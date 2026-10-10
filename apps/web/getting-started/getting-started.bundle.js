@@ -9908,7 +9908,7 @@ function initFlashPage(doc = document) {
   let bundledFirmware = null;
   let bundledA2600Core = null;
   let bundledA2600Rom = null;
-  const assetVersion = true ? "0.4.8" : "dev";
+  const assetVersion = true ? "0.4.9" : "dev";
   function renderFirmwareSources(manifest) {
     const el = doc.getElementById("esp32-sources");
     const components = manifest.components;

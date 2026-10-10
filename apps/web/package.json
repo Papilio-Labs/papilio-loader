@@ -1,7 +1,7 @@
 {
   "name": "@papilio-loader/web",
   "private": true,
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Static web build of the Papilio Loader UI (guided flash page + full loader page), bundled with esbuild for deployment to papilioworks.com.",
   "type": "module",
   "scripts": {
