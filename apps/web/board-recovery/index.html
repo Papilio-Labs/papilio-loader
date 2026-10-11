@@ -71,6 +71,14 @@
         the board in over USB and flash it to restore the new Papilio ESP Bootloader,
         even if the current firmware is rebooting or is an older FPGA-Companion image.
       </p>
+      <p class="flash-step-desc">
+        If needed, hold down the ESP32-S3's <strong>BOOT</strong> button while powering
+        on the board over USB to enter factory boot mode. When connected, the Retrocade's
+        ESP32 usually appears as two serial ports; choose the lower-numbered one in the
+        browser's serial-port chooser. If you are unsure which ports belong to the board, unplug
+        it and note which ports disappear, then plug it back in and watch for those ports
+        to return.
+      </p>
       <p class="flash-step-desc" id="esp32-sources">
         Contains the latest
         <a href="https://github.com/Papilio-Labs/papilio-esp-bootloader/releases/latest" target="_blank" rel="noopener">Papilio ESP Bootloader</a>
