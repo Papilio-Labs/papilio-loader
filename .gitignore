@@ -10,8 +10,8 @@ node_modules/
 uploads/
 
 # Firmware mirrored server-side by scripts/fetch-latest-firmware.mjs for the
-# Getting Started page — regenerated on every deploy, not checked in here.
-apps/web/getting-started/firmware/
+# Board Recovery page — regenerated on every deploy, not checked in here.
+apps/web/board-recovery/firmware/
 
 # Distribution / packaging
 .Python

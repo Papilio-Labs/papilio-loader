@@ -1,5 +1,5 @@
 // build.mjs — bundles the two page entry points into single ESM files that
-// the copied getting-started/index.html and loader/index.html reference
+// the copied board-recovery/index.html and loader/index.html reference
 // directly. No framework, no dev server magic — just esbuild producing
 // static output that can be served by any static file host (matches
 // papilioworks.com's existing GitHub Pages deploy).
@@ -19,7 +19,7 @@ const shared = {
 };
 
 const entries = [
-  { entry: "src/getting-started-entry.js", outfile: "getting-started/getting-started.bundle.js" },
+  { entry: "src/board-recovery-entry.js", outfile: "board-recovery/board-recovery.bundle.js" },
   { entry: "src/loader-entry.js", outfile: "loader/loader.bundle.js" },
   { entry: "src/wifi-log-entry.js", outfile: "wifi-log/wifi-log.bundle.js" },
 ];

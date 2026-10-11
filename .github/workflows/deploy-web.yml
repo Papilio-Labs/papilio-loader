@@ -1,10 +1,10 @@
 name: Deploy web build to papilioworks.com
 
-# Builds apps/web (esbuild bundles of getting-started/ and loader/), mirrors
+# Builds apps/web (esbuild bundles of board-recovery/ and loader/), mirrors
 # the latest FPGA-Companion ESP32 release binary server-side (browsers can't
 # fetch GitHub release assets directly — no CORS headers on them), and syncs
-# the output into the Papilio-Works/papilioworks.com repo's getting-started/
-# and loader/ directories. That repo auto-deploys to the live site (HostGator
+# the output into the Papilio-Works/papilioworks.com repo's board-recovery/,
+# getting-started/ redirect, and loader/ directories. That repo auto-deploys to the live site (HostGator
 # via rsync) on every push to its own main branch, so this workflow's push is
 # what actually goes live.
 
@@ -19,7 +19,7 @@ on:
       - ".github/workflows/deploy-web.yml"
   schedule:
     # Catches new FPGA-Companion releases even when nothing in this repo
-    # changes — keeps the bundled ESP32 firmware on the Getting Started page
+    # changes — keeps the bundled ESP32 firmware on the Board Recovery page
     # current without anyone remembering to trigger a rebuild.
     - cron: "0 12 * * *"
   workflow_dispatch: {}
@@ -56,10 +56,11 @@ jobs:
           token: ${{ secrets.PAPILIOWORKS_DEPLOY_TOKEN }}
           path: papilioworks.com
 
-      - name: Sync getting-started/ and loader/ into papilioworks.com
+      - name: Sync board-recovery/, legacy redirect, and loader/ into papilioworks.com
         run: |
           set -euo pipefail
           rm -rf papilioworks.com/flash
+          rsync -a --delete apps/web/board-recovery/ papilioworks.com/board-recovery/
           rsync -a --delete apps/web/getting-started/ papilioworks.com/getting-started/
           rsync -a --delete apps/web/loader/ papilioworks.com/loader/
           rsync -a apps/web/css/ papilioworks.com/css/
@@ -70,10 +71,10 @@ jobs:
           set -euo pipefail
           git config user.name "papilio-loader-mcp-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add -A -- getting-started loader css
+          git add -A -- getting-started board-recovery loader css
           if git diff --cached --quiet; then
-            echo "No changes to getting-started/, loader/, or css/ — nothing to sync."
+            echo "No changes to board-recovery/, getting-started/, loader/, or css/ — nothing to sync."
             exit 0
           fi
-          git commit -m "getting-started+loader: sync web build from papilio-loader-mcp@${GITHUB_SHA::7}"
+          git commit -m "board-recovery+loader: sync web build from papilio-loader-mcp@${GITHUB_SHA::7}"
           git push

@@ -1,6 +1,6 @@
 // fetch-latest-firmware.mjs — downloads the latest Papilio ESP Bootloader
 // recovery image and writes it (plus a small manifest) into
-// apps/web/getting-started/firmware/ so the Getting Started page can flash it
+// apps/web/board-recovery/firmware/ so the Board Recovery page can flash it
 // with no manual download step.
 //
 // This must run server-side (CI or a local dev machine) — GitHub only sends
@@ -23,7 +23,7 @@ const A2600_CORE_NAME = "a2600nano_retrocade.bin";
 const A2600_ROM_NAME = "a2600crt.bin";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const outDir = path.join(scriptDir, "..", "apps", "web", "getting-started", "firmware");
+const outDir = path.join(scriptDir, "..", "apps", "web", "board-recovery", "firmware");
 
 async function main() {
   const headers = {
