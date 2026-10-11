@@ -1,8 +1,8 @@
-# Papilio Loader MCP Server
+# Papilio Loader
 
-An MCP (Model Context Protocol) server for loading FPGA bit files and ESP32 firmware over the network. This server runs on Windows with direct access to USB/serial ports, while allowing remote clients (like WSL or Linux machines) to program devices over the network.
+Papilio Loader programs Papilio boards with FPGA bitstreams and ESP32 firmware. Use the Electron desktop application or the no-install browser-based Web Edition for USB and network-based workflows. MCP is an optional interface: the Electron app includes an MCP server, and a separate Python package remains available for Python-based workflows.
 
-## 🎉 NEW: Desktop Application Available!
+## Desktop Application
 
 The Electron desktop loader restores the **Saved Files Library** (save/load,
 rename, descriptions, delete, ZIP backup/import including Python exports) and
@@ -12,64 +12,57 @@ local file selection and USB logs. See
 [Saved Files](documentation/SAVED_FILES_FEATURE.md#electron-desktop-app) and
 [Desktop Features](documentation/DESKTOP_APP.md#electron-loader).
 
-Papilio Loader is now available as a **desktop application** with system tray integration! Perfect for end users who want a simple, easy-to-use interface.
+The Windows desktop application includes system-tray integration and a simple interface for programming boards.
 
-**[👉 Download Desktop App Installer](https://github.com/Papilio-Labs/papilio-loader-mcp/releases)**
+**[👉 Download Desktop App Installer](https://github.com/Papilio-Labs/papilio-loader/releases)**
 
 See [DESKTOP_APP.md](documentation/DESKTOP_APP.md) for installation and usage instructions.
 
 ## Features
 
-- **Desktop Application** (NEW!): System tray app with one-click installer for Windows
-- **OTA Updates** (NEW!): Flash devices over WiFi/network without USB connection
+- **Electron Desktop Application**: Windows app with system-tray integration
+- **Web Edition**: Browser-based loader for programming devices without installing a desktop app
+- **USB and OTA programming**: Flash over USB or, for compatible devices, WiFi/network
   - Discover OTA-capable devices on local network
   - Flash ESP32 firmware and FPGA bitstreams wirelessly
   - Supports devices with HTTP OTA endpoints (port 3232)
-- **Web Interface**: Modern browser-based UI for manual device flashing by end users
-  - **Saved Files Library**: Save frequently-used firmware files with descriptions for easy reuse
-- **MCP Server**: Integrates with Claude Desktop and other MCP clients for AI-assisted device programming
-- **REST API**: FastAPI-based HTTP API for remote network access
+- **MCP integration**: Available in the Electron app and through the separate Python package
+- **Python REST API**: FastAPI-based interface provided by the Python package
+- **Saved Files Library**: Save frequently-used firmware files with descriptions for easy reuse
 - **Dual Programming Tools**: 
   - Official esptool for ESP32 programming (safe and stable)
   - pesptool (GadgetFactory fork) for FPGA programming only
 - **Gowin FPGA Support**: Flash Papilio boards (Gowin FPGA) with .bin files via pesptool
 - **ESP32 Support**: Flash ESP32 devices with bin/elf files using official esptool, supports multi-partition flashing
-- **Network-based**: Run on Windows with serial port access, control from WSL/Linux over network
 
 ## Quick Start
 
 ### Option 1: Desktop Application (Easiest)
 
-1. Download and install `PapilioLoader-Setup-x.x.x.exe` from [Releases](https://github.com/Papilio-Labs/papilio-loader-mcp/releases)
+1. Download and install `PapilioLoader-Setup-x.x.x.exe` from [Releases](https://github.com/Papilio-Labs/papilio-loader/releases)
 2. Launch Papilio Loader from Start Menu
 3. System tray icon appears - right-click and select "Open Web Interface"
 
 See [DESKTOP_APP.md](documentation/DESKTOP_APP.md) for details.
 
-### Option 2: Web Interface (Python)
+### Option 2: Web Edition
+
+Use the [Papilio Loader Web Edition](https://papilioworks.com/loader/) in a supported browser; nothing needs to be installed.
+
+### Option 3: Python MCP/API package
+
+The separate Python package remains available for MCP, REST API, and its Python-hosted web interface:
 
 ```powershell
-# 1. Install dependencies
 uv pip install -e .
-
-# 2. Start the combined server (MCP + Web Interface)
-.\start.ps1
-
-# 3. Open browser to http://localhost:8000/web/login
-# Default credentials: admin/admin
+python start_combined_server.py
 ```
 
-See [WEB_INTERFACE_GUIDE.md](documentation/WEB_INTERFACE_GUIDE.md) for detailed instructions.
+See [Python installation](documentation/INSTALLATION.md) and the [MCP quick start](documentation/QUICKSTART.md) for details.
 
-### Option 3: MCP Server Only
+## Python Package Architecture
 
-```powershell
-# Install and configure for Claude Desktop or other MCP clients
-# See documentation/QUICKSTART.md
-```
-
-## Architecture
-
+The following architecture describes the optional Python server package:
 ```
 ┌─────────────────┐         Network          ┌──────────────────┐
 │   Web Browser   │ ◄────────────────────► │  Windows Host    │
@@ -90,7 +83,9 @@ See [WEB_INTERFACE_GUIDE.md](documentation/WEB_INTERFACE_GUIDE.md) for detailed 
                                             └─────────────────┘
 ```
 
-## Installation
+## Python Package Installation
+
+The Electron app is distributed through the [GitHub Releases](https://github.com/Papilio-Labs/papilio-loader/releases) page. The following setup is for the separate Python package.
 
 ### Prerequisites
 
@@ -104,8 +99,8 @@ See [WEB_INTERFACE_GUIDE.md](documentation/WEB_INTERFACE_GUIDE.md) for detailed 
 
 ```bash
 # Clone the repository
-git clone https://github.com/papilio-labs/papilio-loader-mcp.git
-cd papilio-loader-mcp
+git clone https://github.com/papilio-labs/papilio-loader.git
+cd papilio-loader
 
 # Initialize submodules
 git submodule update --init --recursive
@@ -330,7 +325,7 @@ flash_device_ota(
 ### Project Structure
 
 ```
-papilio-loader-mcp/
+papilio-loader/
 ├── src/
 │   └── papilio_loader_mcp/
 │       ├── __init__.py
