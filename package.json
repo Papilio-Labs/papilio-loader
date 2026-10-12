@@ -1,7 +1,7 @@
 {
   "name": "papilio-loader",
   "private": true,
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Unified Papilio Loader — one flasher-core + UI, packaged as web static build and Electron desktop app",
   "workspaces": [
     "packages/*",

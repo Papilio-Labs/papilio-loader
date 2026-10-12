@@ -9908,14 +9908,14 @@ function initFlashPage(doc = document) {
   let bundledFirmware = null;
   let bundledA2600Core = null;
   let bundledA2600Rom = null;
-  const assetVersion = true ? "0.5.0" : "dev";
+  const assetVersion = true ? "0.5.1" : "dev";
   function renderFirmwareSources(manifest) {
     const el = doc.getElementById("esp32-sources");
     const components = manifest.components;
     if (!el || !components) return;
     el.replaceChildren();
     el.append("Contains ");
-    [components.bootloader, components.companion].forEach((c, i) => {
+    [components.bootloader, components.companion].filter(Boolean).forEach((c, i) => {
       if (i) el.append(" + ");
       const release = doc.createElement("a");
       release.href = c.releaseUrl;
@@ -9929,9 +9929,9 @@ function initFlashPage(doc = document) {
       source.textContent = "source";
       el.append(release, " (", source, ")");
     });
-    if (manifest.releaseUrl) {
+    if (manifest.fileName) {
       const image = doc.createElement("a");
-      image.href = manifest.releaseUrl;
+      image.href = `firmware/${encodeURIComponent(manifest.fileName)}?v=${encodeURIComponent(assetVersion)}`;
       image.target = "_blank";
       image.rel = "noopener";
       image.textContent = manifest.fileName;

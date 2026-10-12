@@ -1,7 +1,7 @@
 {
   "name": "@papilio-loader/desktop",
   "private": true,
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Papilio Loader desktop app (Electron) — wraps the same loader-ui/flasher-core web build with WebSerial select-serial-port support, LAN discovery, UDP WiFi log monitor, saved-files, and an in-process MCP server.",
   "author": "Gadget Factory",
   "type": "commonjs",
