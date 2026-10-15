@@ -23,6 +23,10 @@ const A2600_CORE_NAME = "a2600nano_retrocade.bin";
 const A2600_ROM_NAME = "a2600crt.bin";
 const PARTITION_TABLE_OFFSET = 0x8000;
 const BOOTLOADER_PARTITION_SIZE = 0x8000;
+const APP_DESC_OFFSET = 0x20;
+const APP_DESC_MAGIC = 0xabcd5432;
+const APP_VERSION_OFFSET = 16;
+const APP_VERSION_LENGTH = 32;
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(scriptDir, "..", "apps", "web", "board-recovery", "firmware");
@@ -48,6 +52,47 @@ function parsePartitionTable(table) {
   }
 
   return entries;
+}
+
+function readEspAppVersion(app) {
+  if (app.bytes.length < APP_DESC_OFFSET + APP_VERSION_OFFSET + APP_VERSION_LENGTH) {
+    throw new Error(`ESP app ${app.fileName} is too small to contain an application descriptor`);
+  }
+
+  const view = new DataView(app.bytes.buffer, app.bytes.byteOffset, app.bytes.byteLength);
+  if (view.getUint32(APP_DESC_OFFSET, true) !== APP_DESC_MAGIC) {
+    throw new Error(`ESP app ${app.fileName} does not contain an application descriptor at the expected offset`);
+  }
+
+  const versionBytes = app.bytes.subarray(
+    APP_DESC_OFFSET + APP_VERSION_OFFSET,
+    APP_DESC_OFFSET + APP_VERSION_OFFSET + APP_VERSION_LENGTH,
+  );
+  return new TextDecoder().decode(versionBytes).split("\0", 1)[0];
+}
+
+function validateCompanionMigration(migration, companionApp, partitionTable, releaseTag) {
+  const appVersion = readEspAppVersion(companionApp);
+  if (appVersion !== releaseTag) {
+    throw new Error(
+      `FPGA-Companion release ${releaseTag} contains app version ${appVersion || "(empty)"}`,
+    );
+  }
+
+  const ota0 = parsePartitionTable(partitionTable.bytes)
+    .find((entry) => entry.type === 0 && entry.subtype === 0x10);
+  if (!ota0 || companionApp.bytes.length > ota0.size) {
+    throw new Error(`FPGA-Companion app does not fit the ota_0 partition in release ${releaseTag}`);
+  }
+
+  const embeddedApp = migration.bytes.subarray(
+    ota0.offset,
+    ota0.offset + companionApp.bytes.length,
+  );
+  if (embeddedApp.length !== companionApp.bytes.length ||
+      !embeddedApp.every((byte, index) => byte === companionApp.bytes[index])) {
+    throw new Error(`FPGA-Companion migration image ota_0 does not match the standalone app in release ${releaseTag}`);
+  }
 }
 
 function overlayLatestBootloader(migration, app, secondStage, partitionTable) {
@@ -142,19 +187,28 @@ async function main() {
 
   let recoveryImage = await downloadAsset(recoveryAsset, recoveryRelease.tag_name);
   let bootloaderApp = null;
+  let companionApp = null;
   if (migrationAsset) {
+    const companionAppAsset = (companionRelease.assets || [])
+      .find((a) => a.name === `fpga_companion-${companionRelease.tag_name}.bin`);
     const appAsset = (release.assets || []).find((a) => a.name === `papilio-esp-bootloader-${release.tag_name}.bin`);
     const secondStageAsset = (release.assets || []).find((a) => a.name === "bootloader.bin");
     const partitionTableAsset = (release.assets || []).find((a) => a.name === "partition-table.bin");
+    if (!companionAppAsset) {
+      throw new Error(`FPGA-Companion ${companionRelease.tag_name} is missing its standalone app release asset`);
+    }
     if (!appAsset || !secondStageAsset || !partitionTableAsset) {
       throw new Error(`Papilio ESP Bootloader ${release.tag_name} is missing an app, bootloader, or partition-table release asset`);
     }
 
-    const [appImage, secondStage, partitionTable] = await Promise.all([
+    const [companionAppImage, appImage, secondStage, partitionTable] = await Promise.all([
+      downloadAsset(companionAppAsset, companionRelease.tag_name),
       downloadAsset(appAsset, release.tag_name),
       downloadAsset(secondStageAsset, release.tag_name),
       downloadAsset(partitionTableAsset, release.tag_name),
     ]);
+    companionApp = companionAppImage;
+    validateCompanionMigration(recoveryImage, companionAppImage, partitionTable, companionRelease.tag_name);
     bootloaderApp = appImage;
     const bytes = overlayLatestBootloader(recoveryImage, appImage, secondStage, partitionTable);
     recoveryImage = {
@@ -185,6 +239,7 @@ async function main() {
     sourceAssets: migrationAsset
       ? {
           bootloaderApp: bootloaderApp.sourceUrl,
+          companionApp: companionApp.sourceUrl,
           companionMigration: recoveryAsset.browser_download_url,
         }
       : undefined,
