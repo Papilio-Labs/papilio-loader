@@ -94,6 +94,12 @@ export async function flashFpgaOta(
   return poster.post(url, body, onProgress);
 }
 
+export interface RomUploadOptions {
+  // "root" saves to the SD-card root (FPGA-Companion v2.1.0+). Omitted, the
+  // Companion saves to /roms/.
+  location?: "root";
+}
+
 // POST /rom-load?name=... — writes a ROM image to the Companion's SD card
 // and asks the active core to insert it into drive 0.
 export async function uploadRomOta(
@@ -102,9 +108,11 @@ export async function uploadRomOta(
   fileName: string,
   body: BodyInit,
   onProgress: OtaProgressCallback,
-  port: number = OTA_PORT
+  port: number = OTA_PORT,
+  options: RomUploadOptions = {}
 ): Promise<string> {
-  const url = `http://${ip}:${port}/rom-load?name=${encodeURIComponent(fileName)}`;
+  const location = options.location ? `&location=${encodeURIComponent(options.location)}` : "";
+  const url = `http://${ip}:${port}/rom-load?name=${encodeURIComponent(fileName)}${location}`;
   return poster.post(url, body, onProgress);
 }
 
