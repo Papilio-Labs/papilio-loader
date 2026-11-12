@@ -11,6 +11,7 @@ import {
   SERIAL_FPGA_TARGET,
   flashFpgaOta,
   uploadRomOta,
+  OTA_PORT,
   resumeEsp32Ota,
   requestGotoLoader,
   fetchDeviceStatusText,
@@ -22,6 +23,11 @@ import {
   bootCompanionOverUsb,
 } from "@papilio-loader/flasher-core";
 import { makeLogger, setStatus } from "./dom.js";
+
+// The A2600 core only auto-loads the splash when it sits at the SD-card root
+// under this exact name, so Step 4 uploads it under this name rather than the
+// manifest's download fileName.
+const A2600_SD_ROM_NAME = "a2600.crt";
 
 export function initFlashPage(doc = document) {
   const els = {
@@ -808,9 +814,16 @@ export function initFlashPage(doc = document) {
         throw new Error(`FPGA-Companion did not answer at ${deviceIp}. Check the board is on WiFi, then retry.`);
       }
       setStatus(els.statusRom, "Uploading the Papilio Splash demo ROM…");
-      const responseText = await uploadRomOta(otaPoster, deviceIp, bundledA2600Rom.fileName, data.buffer, updateRomProgress);
+      const responseText = await uploadRomOta(otaPoster, deviceIp, A2600_SD_ROM_NAME, data.buffer, updateRomProgress, OTA_PORT, { location: "root" });
       log(responseText);
-      setStatus(els.statusRom, "Papilio Splash ROM uploaded and inserted. A FAT-formatted SD card is required.", "ok");
+      const savedPath = responseText.match(/->\s+([^\r\n]+)/)?.[1]?.trim();
+      const savedPathParts = (savedPath || "").split("/").filter(Boolean);
+      const savedAtRoot = savedPathParts[savedPathParts.length - 1] === A2600_SD_ROM_NAME &&
+        (savedPathParts.length === 1 || (savedPathParts.length === 2 && savedPathParts[0] === "sd"));
+      if (!savedAtRoot) {
+        throw new Error("This FPGA-Companion firmware did not save the ROM to the SD-card root. Update FPGA-Companion to a version that supports root uploads, then retry.");
+      }
+      setStatus(els.statusRom, "Papilio Splash ROM saved to the SD-card root and inserted. It will load again after reboot. A FAT-formatted SD card is required.", "ok");
     } catch (err) {
       log(`ROM upload failed: ${err.message}`);
       const hint = /HTTP 5\d\d|f_open|SD/i.test(err.message) ? " Make sure a FAT-formatted microSD card is inserted in the board." : "";
