@@ -24,11 +24,6 @@ import {
 } from "@papilio-loader/flasher-core";
 import { makeLogger, setStatus } from "./dom.js";
 
-// The A2600 core only auto-loads the splash when it sits at the SD-card root
-// under this exact name, so Step 4 uploads it under this name rather than the
-// manifest's download fileName.
-const A2600_SD_ROM_NAME = "a2600.crt";
-
 export function initFlashPage(doc = document) {
   const els = {
     unsupportedBanner: doc.getElementById("unsupported-banner"),
@@ -814,11 +809,13 @@ export function initFlashPage(doc = document) {
         throw new Error(`FPGA-Companion did not answer at ${deviceIp}. Check the board is on WiFi, then retry.`);
       }
       setStatus(els.statusRom, "Uploading the Papilio Splash demo ROM…");
-      const responseText = await uploadRomOta(otaPoster, deviceIp, A2600_SD_ROM_NAME, data.buffer, updateRomProgress, OTA_PORT, { location: "root" });
+      // The A2600 core auto-loads the splash from the SD-card root under the
+      // manifest's file name (a2600crt.bin), so upload it unchanged.
+      const responseText = await uploadRomOta(otaPoster, deviceIp, bundledA2600Rom.fileName, data.buffer, updateRomProgress, OTA_PORT, { location: "root" });
       log(responseText);
       const savedPath = responseText.match(/->\s+([^\r\n]+)/)?.[1]?.trim();
       const savedPathParts = (savedPath || "").split("/").filter(Boolean);
-      const savedAtRoot = savedPathParts[savedPathParts.length - 1] === A2600_SD_ROM_NAME &&
+      const savedAtRoot = savedPathParts[savedPathParts.length - 1] === bundledA2600Rom.fileName &&
         (savedPathParts.length === 1 || (savedPathParts.length === 2 && savedPathParts[0] === "sd"));
       if (!savedAtRoot) {
         throw new Error("This FPGA-Companion firmware did not save the ROM to the SD-card root. Update FPGA-Companion to a version that supports root uploads, then retry.");
