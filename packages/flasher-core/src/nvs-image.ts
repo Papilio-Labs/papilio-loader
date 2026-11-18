@@ -203,6 +203,31 @@ export function buildBoardProvisioningRegions(partitions: PartitionEntry[], opti
 const MERGED_PARTITION_TABLE_OFFSET = 0x8000;
 const MERGED_PARTITION_TABLE_SIZE = 0xc00;
 
+// Writes the WiFi settings and boot selection (the same regions
+// provisionBoardOverUsb writes) straight into a merged image, so the image and
+// the WiFi settings go to the board in ONE esptool session with ONE reset at
+// the end. Replaces a separate "send WiFi" step, which needed a second USB
+// reset into the bootloader (the unreliable part on this board). Returns a
+// patched copy; throws if the image is not a merged image or a region would
+// fall outside it.
+export function provisionMergedImage(image: Uint8Array, options: BoardProvisioningOptions): Uint8Array {
+  if (image.length < MERGED_PARTITION_TABLE_OFFSET + MERGED_PARTITION_TABLE_SIZE) {
+    throw new Error("This firmware file is not a merged image, so WiFi settings cannot be added to it.");
+  }
+  const partitions = parsePartitionTable(
+    image.subarray(MERGED_PARTITION_TABLE_OFFSET, MERGED_PARTITION_TABLE_OFFSET + MERGED_PARTITION_TABLE_SIZE)
+  );
+  const regions = buildBoardProvisioningRegions(partitions, options);
+  const patched = image.slice();
+  for (const region of regions) {
+    if (region.address + region.data.length > patched.length) {
+      throw new Error("This firmware image does not cover the board's WiFi settings area, so WiFi settings cannot be added to it.");
+    }
+    patched.set(region.data, region.address);
+  }
+  return patched;
+}
+
 function isErased(data: Uint8Array): boolean {
   return data.every((b) => b === 0xff);
 }

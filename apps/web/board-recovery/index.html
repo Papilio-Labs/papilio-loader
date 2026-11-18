@@ -72,12 +72,10 @@
         even if the current firmware is rebooting or is an older FPGA-Companion image.
       </p>
       <p class="flash-step-desc">
-        If needed, hold down the ESP32-S3's <strong>BOOT</strong> button while powering
-        on the board over USB to enter factory boot mode. When connected, the Retrocade's
-        ESP32 usually appears as two serial ports; choose the lower-numbered one in the
-        browser's serial-port chooser. If you are unsure which ports belong to the board, unplug
-        it and note which ports disappear, then plug it back in and watch for those ports
-        to return.
+        <strong>For the most reliable start, hold down the ESP32-S3's BOOT button while plugging in
+        the USB cable.</strong> That puts the board straight into its programming mode, so the page
+        doesn't have to reset it. The Retrocade's ESP32 appears as two serial ports in the browser's
+        chooser: pick the first one listed, and if it can't connect, try the other one.
       </p>
       <p class="flash-step-desc" id="esp32-sources">
         Contains the latest
@@ -86,6 +84,16 @@
         <a href="https://github.com/Papilio-Retrocade/FPGA-Companion/releases/latest" target="_blank" rel="noopener">FPGA-Companion</a>
         (<a href="https://github.com/Papilio-Retrocade/FPGA-Companion" target="_blank" rel="noopener">source</a>).
       </p>
+
+      <p class="flash-step-desc">
+        <strong>WiFi (optional, 2.4 GHz only).</strong> Enter your network and it is saved to the
+        board during this install, over USB &mdash; never sent over the internet. Leave it blank to
+        skip it; you can add it later under Advanced tools. Steps 2 and 3 need WiFi.
+      </p>
+      <div class="flash-row">
+        <input type="text" id="install-ssid" placeholder="WiFi network name (SSID), optional" autocomplete="off">
+        <input type="password" id="install-pass" placeholder="WiFi password" autocomplete="off">
+      </div>
 
       <div class="flash-row">
         <button id="btn-connect" class="btn btn-outline">Connect USB</button>
@@ -108,46 +116,17 @@
       <p class="flash-status" id="status-esp32"></p>
     </section>
 
-    <!-- STEP 2 — WiFi credentials -->
-    <section class="flash-step" id="step-wifi">
-      <div class="flash-step-header">
-        <span class="flash-step-num">2</span>
-        <h2>Connect to Your WiFi</h2>
-      </div>
-      <p class="flash-step-desc">
-        Written directly into the board's flash over USB — never sent over the internet. The board
-        then restarts into FPGA-Companion, joins your WiFi (2.4 GHz only), and reports its IP here.
-        <strong>Already flashed and connected to WiFi from a previous session?</strong> Plug it into
-        USB, click <em>Find My IP</em> below, then press RESET — no need to resend credentials.
-      </p>
-
-      <div class="flash-row">
-        <input type="text" id="wifi-ssid" placeholder="WiFi network name (SSID)" autocomplete="off">
-        <input type="password" id="wifi-pass" placeholder="WiFi password" autocomplete="off">
-        <button id="btn-send-wifi" class="btn btn-primary" disabled>Send to Board</button>
-        <button id="btn-find-ip" class="btn btn-outline">Find My IP</button>
-      </div>
-      <p class="flash-status" id="status-wifi"></p>
-
-      <div class="flash-row">
-        <span class="flash-ip-label">Device IP:</span>
-        <strong id="device-ip">waiting for board&hellip;</strong>
-        <input type="text" id="device-ip-manual" placeholder="or enter IP manually, e.g. 192.168.1.42">
-        <button id="btn-use-manual-ip" class="btn btn-outline">Use This IP</button>
-      </div>
-    </section>
-
-    <!-- STEP 3 — Install the A2600 core -->
+    <!-- STEP 2 — Install the A2600 core -->
     <section class="flash-step" id="step-fpga">
       <div class="flash-step-header">
-        <span class="flash-step-num">3</span>
+        <span class="flash-step-num">2</span>
         <h2>Install the Latest A2600 Core</h2>
       </div>
       <p class="flash-step-desc">
         Downloads the latest published Atari 2600 FPGA core and writes it to the board's FPGA
         flash. The page first switches the board into the Papilio ESP Bootloader (which does
         the flashing), then returns it to FPGA-Companion. Sent directly from this browser tab — over WiFi if the device's IP is known
-        (fastest), or over the USB connection from Step 1/2 if it isn't. No cloud relay either way.
+        (fastest), or over the USB connection from Step 1 if it isn't. No cloud relay either way.
       </p>
 
       <div class="flash-row">
@@ -190,16 +169,16 @@
       </details>
     </section>
 
-    <!-- STEP 4 — Load a demo game ROM -->
+    <!-- STEP 3 — Load a demo game ROM -->
     <section class="flash-step" id="step-rom">
       <div class="flash-step-header">
-        <span class="flash-step-num">4</span>
+        <span class="flash-step-num">3</span>
         <h2>Load a Demo Game ROM</h2>
       </div>
       <p class="flash-step-desc">
-        Sends the Papilio Splash demo ROM to the A2600 core installed in Step 3. Insert a
+        Sends the Papilio Splash demo ROM to the A2600 core installed in Step 2. Insert a
         <strong>FAT-formatted SD card</strong> first — the ROM is saved to the card and then
-        started on the core. Requires WiFi (a known device IP from Step 2).
+        started on the core. Requires WiFi (a known device IP: enter your WiFi in Step 1, or use the WiFi tools under Advanced tools).
       </p>
 
       <div class="flash-row">
@@ -210,7 +189,39 @@
         <div class="progress-bar" style="width:0%"></div>
       </div>
       <p class="flash-status" id="status-rom"></p>
-    </section>  </main>
+    </section>
+
+    <!-- Advanced tools: WiFi later, find IP, restart -->
+    <details class="flash-advanced" id="tools-advanced">
+      <summary>Advanced tools: add WiFi later, find the board's IP, restart over USB</summary>
+      <p class="flash-step-desc">
+        <strong>Skipped WiFi in Step 1?</strong> Enter it here (it is written over USB, never sent over the
+        internet; the board restarts into FPGA-Companion and joins your 2.4 GHz WiFi).
+        <strong>Already set up from a previous session?</strong> Click <em>Find My IP</em> and press RESET
+        on the board, or type its IP below, then go straight to Step 2.
+      </p>
+
+      <div class="flash-row">
+        <input type="text" id="wifi-ssid" placeholder="WiFi network name (SSID)" autocomplete="off">
+        <input type="password" id="wifi-pass" placeholder="WiFi password" autocomplete="off">
+        <button id="btn-send-wifi" class="btn btn-primary" disabled>Send to Board</button>
+        <button id="btn-find-ip" class="btn btn-outline">Find My IP</button>
+      </div>
+      <p class="flash-status" id="status-wifi"></p>
+
+      <div class="flash-row">
+        <span class="flash-ip-label">Device IP:</span>
+        <strong id="device-ip">waiting for board&hellip;</strong>
+        <input type="text" id="device-ip-manual" placeholder="or enter IP manually, e.g. 192.168.1.42">
+        <button id="btn-use-manual-ip" class="btn btn-outline">Use This IP</button>
+      </div>
+
+      <div class="flash-row">
+        <button id="btn-reset-usb" class="btn btn-outline">Restart Board (USB)</button>
+      </div>
+      <p class="flash-status" id="status-tools"></p>
+    </details>
+  </main>
 
   <script type="module" src="board-recovery.bundle.js?v=0.5.1"></script>
 </body>

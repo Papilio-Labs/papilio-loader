@@ -1,4 +1,5 @@
-// flash-page.js — guided 4-step beginner flow (Flash ESP32 → WiFi → A2600 core → demo ROM).
+// flash-page.js — guided 3-step beginner flow (Flash ESP32 + optional WiFi → A2600 core → demo ROM),
+// with WiFi, find-IP and USB-restart tools under Advanced.
 // Ported from papilioworks.com/flash/flash.js onto @papilio-loader/flasher-core.
 // UI copy/DOM structure intentionally unchanged — validated with real users.
 import {
@@ -20,6 +21,8 @@ import {
   createBrowserXhrPoster,
   detectBinaryImageType,
   seedBootSelectionInMergedImage,
+  provisionMergedImage,
+  resetEsp32ForIp,
   bootCompanionOverUsb,
 } from "@papilio-loader/flasher-core";
 import { makeLogger, setStatus } from "./dom.js";
@@ -40,6 +43,11 @@ export function initFlashPage(doc = document) {
     btnFlashEsp32: doc.getElementById("btn-flash-esp32"),
     progressEsp32: doc.getElementById("progress-esp32"),
     statusEsp32: doc.getElementById("status-esp32"),
+
+    installSsid: doc.getElementById("install-ssid"),
+    installPass: doc.getElementById("install-pass"),
+    btnResetUsb: doc.getElementById("btn-reset-usb"),
+    statusTools: doc.getElementById("status-tools"),
 
     wifiSsid: doc.getElementById("wifi-ssid"),
     wifiPass: doc.getElementById("wifi-pass"),
@@ -112,6 +120,8 @@ export function initFlashPage(doc = document) {
   let fpgaImageType = null;
   let deviceIp = null;
   let ipSeq = 0;
+  // True while Step 1 is waiting for the board to report its IP after a combined flash + WiFi install.
+  let installAwaitingIp = false;
   let awaitingReconnect = false;
   // Bundled firmware manifest (same-origin firmware/manifest.json, written by
   // scripts/fetch-latest-firmware.mjs during the deploy build). Lets Step 1
@@ -156,7 +166,7 @@ export function initFlashPage(doc = document) {
 
   if (!("serial" in navigator)) {
     els.unsupportedBanner.hidden = false;
-    [els.btnConnect, els.btnFlashEsp32, els.btnSendWifi, els.btnFlashFpga, els.btnFlashA2600, els.btnLoadRom, els.btnFindIp, els.btnOpenLog, els.btnCloseLog].forEach(
+    [els.btnConnect, els.btnFlashEsp32, els.btnSendWifi, els.btnFlashFpga, els.btnFlashA2600, els.btnLoadRom, els.btnFindIp, els.btnResetUsb, els.btnOpenLog, els.btnCloseLog].forEach(
       (btn) => (btn.disabled = true)
     );
     return;
@@ -314,28 +324,9 @@ export function initFlashPage(doc = document) {
   // /resume uses a CPU-only restart that FPGA-Companion v2.0.0 can crash on
   // right after an FPGA write, which rollback turns into a return to the
   // loader. Without USB, fall back to repeated POST /resume over WiFi.
-  async function returnToCompanion(ip, timeoutMs = 60000) {
-    if (ip && (await companionIsStable(ip))) {
-      log(`FPGA-Companion is running at ${ip}.`);
-      return true;
-    }
-
-    if (serialPort) {
-      log("Restarting into FPGA-Companion over USB…");
-      await bootCompanionViaUsb();
-      if (!ip) return true;
-      const started = Date.now();
-      while (Date.now() - started < timeoutMs) {
-        if (await companionIsStable(ip)) {
-          log(`FPGA-Companion is running at ${ip}.`);
-          return true;
-        }
-        await sleep(1000);
-      }
-      return false;
-    }
-
-    if (!ip) return false;
+  // The bootloader's own /resume over WiFi. Needs no USB reset, so it is the
+  // reliable way back to FPGA-Companion whenever the board has an IP.
+  async function resumeCompanionOverWifi(ip, timeoutMs) {
     const started = Date.now();
     let lastResume = 0;
     while (Date.now() - started < timeoutMs) {
@@ -356,6 +347,38 @@ export function initFlashPage(doc = document) {
           }
           log(`Resume request: ${err.message}; checking again…`);
         }
+      }
+      await sleep(1000);
+    }
+    return false;
+  }
+
+  // Bring the board back to FPGA-Companion. With an IP, go over WiFi first:
+  // the USB reset into the ROM bootloader is unreliable on this board (it
+  // failed with "Failed to set control signals" and left the board parked in
+  // the bootloader after Step 3). USB is only the fallback, or the only route
+  // when there is no IP.
+  async function returnToCompanion(ip, timeoutMs = 60000) {
+    if (ip && (await companionIsStable(ip))) {
+      log(`FPGA-Companion is running at ${ip}.`);
+      return true;
+    }
+
+    if (ip) {
+      if (await resumeCompanionOverWifi(ip, serialPort ? 30000 : timeoutMs)) return true;
+      if (!serialPort) return false;
+      log("Resuming over WiFi did not work; trying over USB…");
+    }
+
+    if (!serialPort) return false;
+    log("Restarting into FPGA-Companion over USB…");
+    await bootCompanionViaUsb();
+    if (!ip) return true;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (await companionIsStable(ip)) {
+        log(`FPGA-Companion is running at ${ip}.`);
+        return true;
       }
       await sleep(1000);
     }
@@ -461,6 +484,7 @@ export function initFlashPage(doc = document) {
     ipSeq += 1;
     els.deviceIp.textContent = ip;
     setStatus(els.statusWifi, `Board connected — IP ${ip}`, "ok");
+    if (installAwaitingIp) setStatus(els.statusEsp32, `ESP32 flashed. Board connected — IP ${ip}`, "ok");
     updateFlashFpgaEnabled();
     updateA2600Enabled();
   }
@@ -489,7 +513,9 @@ export function initFlashPage(doc = document) {
 
   function updateFlashEsp32Enabled() {
     const hasFirmware = Boolean(bundledFirmware) || (Boolean(els.esp32File.files[0]) && esp32ImageType === "esp32");
-    els.btnFlashEsp32.disabled = !(serialPort && hasFirmware);
+    // Only disabled while there is nothing to flash; with no USB connection yet,
+    // clicking it asks for the port first (see the click handler).
+    els.btnFlashEsp32.disabled = !hasFirmware;
   }
 
   function updateFlashFpgaEnabled() {
@@ -532,6 +558,7 @@ export function initFlashPage(doc = document) {
         "ok"
       );
       updateFlashEsp32Enabled();
+      els.btnSendWifi.disabled = false;
     } catch (err) {
       log(`Connect failed: ${err.message}`);
       setStatus(els.statusEsp32, `Connect failed: ${err.message}`, "error");
@@ -540,7 +567,33 @@ export function initFlashPage(doc = document) {
 
   els.btnFlashEsp32.addEventListener("click", async () => {
     const customFile = els.esp32File.files[0];
-    if (!serialPort || !(customFile || bundledFirmware)) return;
+    if (!(customFile || bundledFirmware)) return;
+
+    // Optional WiFi: written into the image so ONE USB session installs the
+    // firmware and the WiFi settings, with a single reset at the end.
+    const installSsid = els.installSsid.value.trim();
+    const installPass = els.installPass.value;
+    if (
+      installSsid &&
+      (new TextEncoder().encode(installSsid).length > 32 || new TextEncoder().encode(installPass).length > 63)
+    ) {
+      setStatus(els.statusEsp32, "WiFi name must be at most 32 bytes and password at most 63.", "error");
+      return;
+    }
+
+    // No need to click Connect USB first: ask for the port now if we don't have one.
+    if (!serialPort) {
+      try {
+        serialPort = await navigator.serial.requestPort();
+        reader = new SerialLineReader(serialPort);
+        wireReaderEvents();
+        log("Serial port selected.");
+      } catch (err) {
+        log(`Connect failed: ${err.message}`);
+        setStatus(els.statusEsp32, `Connect failed: ${err.message}`, "error");
+        return;
+      }
+    }
 
     els.btnFlashEsp32.disabled = true;
     els.btnConnect.disabled = true;
@@ -571,6 +624,10 @@ export function initFlashPage(doc = document) {
         data = seeded;
         log("Seeded otadata (boot FPGA-Companion in ota_0) and loader last_slot=0 into the image.");
       }
+      if (installSsid) {
+        data = provisionMergedImage(data, { ssid: installSsid, password: installPass });
+        log("Added your WiFi settings to the image; they are written in the same USB session.");
+      }
       await closeSerialSession();
       await flashEsp32(serialPort, data, {
         onLog: log,
@@ -580,24 +637,60 @@ export function initFlashPage(doc = document) {
         },
       });
 
+      const previousPort = serialPort;
       await closeSerialSession();
-      // The watchdog reset re-enumerates USB; let the connect listener pick up
-      // the new port object (Send to Board also re-acquires it if needed).
+      // The watchdog reset re-enumerates USB; wait for the board's port to come back.
       awaitingReconnect = true;
       log("ESP32 write complete; USB serial port closed.");
-      setStatus(els.statusEsp32, "ESP32 flashed.", "ok");
       els.btnSendWifi.disabled = false;
-      setStatus(els.statusWifi, "Board rebooting automatically. USB serial port closed.");
+      // Never leave the buttons greyed out after a finished install (it used to
+      // need a page reload).
+      els.btnConnect.disabled = false;
+      updateFlashEsp32Enabled();
+      if (!installSsid) {
+        setStatus(
+          els.statusEsp32,
+          "ESP32 flashed. The board is restarting into FPGA-Companion. No WiFi was set; add it under Advanced tools if you want Steps 2 and 3.",
+          "ok"
+        );
+      } else {
+        setStatus(els.statusEsp32, "ESP32 flashed with your WiFi settings. The board is restarting and joining WiFi…", "ok");
+        const ipSeqBefore = ipSeq;
+        installAwaitingIp = true;
+        try {
+          await waitForUsbPort(previousPort);
+          await startSerialListenerWithRetry();
+          if (!(await waitForNewIp(ipSeqBefore, 30000))) {
+            setStatus(
+              els.statusEsp32,
+              "ESP32 flashed and WiFi saved, but the board hasn't reported an IP yet. Check the WiFi name and password (2.4 GHz only), then use Find My IP under Advanced tools.",
+              "error"
+            );
+          }
+        } catch (err) {
+          log(`Listening for the board's IP failed: ${err.message}`);
+          setStatus(
+            els.statusEsp32,
+            `ESP32 flashed and WiFi saved, but the page lost the USB connection (${err.message}). Use Find My IP under Advanced tools.`,
+            "error"
+          );
+        } finally {
+          installAwaitingIp = false;
+        }
+      }
     } catch (err) {
       log(`Flash failed: ${err.message}`);
       setStatus(els.statusEsp32, `Flash failed: ${err.message}`, "error");
+      els.btnConnect.disabled = false;
+      updateFlashEsp32Enabled();
+    } finally {
       els.btnConnect.disabled = false;
       updateFlashEsp32Enabled();
     }
   });
 
   /* -------------------------------------------------------------------- */
-  /* Step 2 — Send WiFi credentials over serial                             */
+  /* Advanced — Send WiFi credentials over serial (add or change WiFi later) */
   /* -------------------------------------------------------------------- */
 
   els.btnSendWifi.addEventListener("click", async () => {
@@ -693,6 +786,39 @@ export function initFlashPage(doc = document) {
   /* -------------------------------------------------------------------- */
   /* Step 3 — Flash FPGA bitstream: WiFi OTA first, USB serial fallback      */
   /* -------------------------------------------------------------------- */
+
+  // Restart the board over USB (watchdog reset). Useful when the board was left
+  // idle in programming mode, or to make it re-print its IP.
+  els.btnResetUsb.addEventListener("click", async () => {
+    els.btnResetUsb.disabled = true;
+    try {
+      if (!serialPort) {
+        serialPort = await navigator.serial.requestPort();
+        reader = new SerialLineReader(serialPort);
+        wireReaderEvents();
+        log("Serial port selected.");
+      }
+      await closeSerialSession();
+      const previousPort = serialPort;
+      awaitingReconnect = true;
+      setStatus(els.statusTools, "Restarting the board…");
+      await resetEsp32ForIp(serialPort, log);
+      await waitForUsbPort(previousPort);
+      await startSerialListenerWithRetry();
+      els.btnSendWifi.disabled = false;
+      setStatus(els.statusTools, "Board restarted. If it has WiFi, its IP appears under Device IP.", "ok");
+    } catch (err) {
+      awaitingReconnect = false;
+      log(`Restart failed: ${err.message}`);
+      setStatus(
+        els.statusTools,
+        `Restart failed: ${err.message} If the board will not respond, unplug the USB cable and plug it back in (hold BOOT while plugging in for the most reliable start).`,
+        "error"
+      );
+    } finally {
+      els.btnResetUsb.disabled = false;
+    }
+  });
 
   function updateFpgaProgress(loaded, total) {
     const pct = total ? Math.round((loaded / total) * 100) : 0;

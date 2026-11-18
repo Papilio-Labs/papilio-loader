@@ -2391,8 +2391,9 @@ async function flashFpgaOta(poster, ip, endpoint, body, onProgress, port = OTA_P
   const url = `http://${ip}:${port}${endpoint}`;
   return poster.post(url, body, onProgress);
 }
-async function uploadRomOta(poster, ip, fileName, body, onProgress, port = OTA_PORT) {
-  const url = `http://${ip}:${port}/rom-load?name=${encodeURIComponent(fileName)}`;
+async function uploadRomOta(poster, ip, fileName, body, onProgress, port = OTA_PORT, options = {}) {
+  const location = options.location ? `&location=${encodeURIComponent(options.location)}` : "";
+  const url = `http://${ip}:${port}/rom-load?name=${encodeURIComponent(fileName)}${location}`;
   return poster.post(url, body, onProgress);
 }
 function createBrowserXhrPoster() {
@@ -9516,6 +9517,21 @@ function buildBoardProvisioningRegions(partitions, options) {
 }
 var MERGED_PARTITION_TABLE_OFFSET = 32768;
 var MERGED_PARTITION_TABLE_SIZE = 3072;
+function provisionMergedImage(image, options) {
+  if (image.length < MERGED_PARTITION_TABLE_OFFSET + MERGED_PARTITION_TABLE_SIZE) {
+    throw new Error("This firmware file is not a merged image, so WiFi settings cannot be added to it.");
+  }
+  const partitions = parsePartitionTable(image.subarray(MERGED_PARTITION_TABLE_OFFSET, MERGED_PARTITION_TABLE_OFFSET + MERGED_PARTITION_TABLE_SIZE));
+  const regions = buildBoardProvisioningRegions(partitions, options);
+  const patched = image.slice();
+  for (const region of regions) {
+    if (region.address + region.data.length > patched.length) {
+      throw new Error("This firmware image does not cover the board's WiFi settings area, so WiFi settings cannot be added to it.");
+    }
+    patched.set(region.data, region.address);
+  }
+  return patched;
+}
 function isErased(data) {
   return data.every((b) => b === 255);
 }
@@ -9556,6 +9572,33 @@ async function watchdogResetEsp32S3(loader) {
   await loader.writeReg(RTC_CNTL_WDTCONFIG0_REG, 3489661186);
   await loader.writeReg(RTC_CNTL_WDTWPROTECT_REG, 0);
   await new Promise((resolve) => setTimeout(resolve, 500));
+}
+async function resetEsp32ForIp(port, onLog) {
+  const transport = new Transport(port, true);
+  const loader = new ESPLoader({
+    transport,
+    baudrate: 115200,
+    terminal: {
+      clean: () => {
+      },
+      writeLine: (msg) => onLog?.(msg),
+      write: (msg) => onLog?.(msg)
+    }
+  });
+  try {
+    const chipName = await loader.main();
+    onLog?.(`Connected to ${chipName} \u2014 resetting to read its boot log...`);
+    if (loader.chip && loader.chip.CHIP_NAME === "ESP32-S3") {
+      await watchdogResetEsp32S3(loader);
+    } else {
+      await loader.after("hard_reset");
+    }
+  } finally {
+    try {
+      await transport.disconnect();
+    } catch {
+    }
+  }
 }
 async function provisionBoardOverUsb(port, options) {
   const transport = new Transport(port, true);
@@ -9839,6 +9882,10 @@ function initFlashPage(doc = document) {
     btnFlashEsp32: doc.getElementById("btn-flash-esp32"),
     progressEsp32: doc.getElementById("progress-esp32"),
     statusEsp32: doc.getElementById("status-esp32"),
+    installSsid: doc.getElementById("install-ssid"),
+    installPass: doc.getElementById("install-pass"),
+    btnResetUsb: doc.getElementById("btn-reset-usb"),
+    statusTools: doc.getElementById("status-tools"),
     wifiSsid: doc.getElementById("wifi-ssid"),
     wifiPass: doc.getElementById("wifi-pass"),
     btnSendWifi: doc.getElementById("btn-send-wifi"),
@@ -9904,6 +9951,7 @@ function initFlashPage(doc = document) {
   let fpgaImageType = null;
   let deviceIp = null;
   let ipSeq = 0;
+  let installAwaitingIp = false;
   let awaitingReconnect = false;
   let bundledFirmware = null;
   let bundledA2600Core = null;
@@ -9940,7 +9988,7 @@ function initFlashPage(doc = document) {
   }
   if (!("serial" in navigator)) {
     els.unsupportedBanner.hidden = false;
-    [els.btnConnect, els.btnFlashEsp32, els.btnSendWifi, els.btnFlashFpga, els.btnFlashA2600, els.btnLoadRom, els.btnFindIp, els.btnOpenLog, els.btnCloseLog].forEach(
+    [els.btnConnect, els.btnFlashEsp32, els.btnSendWifi, els.btnFlashFpga, els.btnFlashA2600, els.btnLoadRom, els.btnFindIp, els.btnResetUsb, els.btnOpenLog, els.btnCloseLog].forEach(
       (btn) => btn.disabled = true
     );
     return;
@@ -10065,26 +10113,7 @@ function initFlashPage(doc = document) {
     await waitForUsbPort(previousPort);
     await startSerialListenerWithRetry();
   }
-  async function returnToCompanion(ip, timeoutMs = 6e4) {
-    if (ip && await companionIsStable(ip)) {
-      log(`FPGA-Companion is running at ${ip}.`);
-      return true;
-    }
-    if (serialPort) {
-      log("Restarting into FPGA-Companion over USB\u2026");
-      await bootCompanionViaUsb();
-      if (!ip) return true;
-      const started2 = Date.now();
-      while (Date.now() - started2 < timeoutMs) {
-        if (await companionIsStable(ip)) {
-          log(`FPGA-Companion is running at ${ip}.`);
-          return true;
-        }
-        await sleep3(1e3);
-      }
-      return false;
-    }
-    if (!ip) return false;
+  async function resumeCompanionOverWifi(ip, timeoutMs) {
     const started = Date.now();
     let lastResume = 0;
     while (Date.now() - started < timeoutMs) {
@@ -10105,6 +10134,30 @@ function initFlashPage(doc = document) {
           }
           log(`Resume request: ${err2.message}; checking again\u2026`);
         }
+      }
+      await sleep3(1e3);
+    }
+    return false;
+  }
+  async function returnToCompanion(ip, timeoutMs = 6e4) {
+    if (ip && await companionIsStable(ip)) {
+      log(`FPGA-Companion is running at ${ip}.`);
+      return true;
+    }
+    if (ip) {
+      if (await resumeCompanionOverWifi(ip, serialPort ? 3e4 : timeoutMs)) return true;
+      if (!serialPort) return false;
+      log("Resuming over WiFi did not work; trying over USB\u2026");
+    }
+    if (!serialPort) return false;
+    log("Restarting into FPGA-Companion over USB\u2026");
+    await bootCompanionViaUsb();
+    if (!ip) return true;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (await companionIsStable(ip)) {
+        log(`FPGA-Companion is running at ${ip}.`);
+        return true;
       }
       await sleep3(1e3);
     }
@@ -10196,6 +10249,7 @@ function initFlashPage(doc = document) {
     ipSeq += 1;
     els.deviceIp.textContent = ip;
     setStatus(els.statusWifi, `Board connected \u2014 IP ${ip}`, "ok");
+    if (installAwaitingIp) setStatus(els.statusEsp32, `ESP32 flashed. Board connected \u2014 IP ${ip}`, "ok");
     updateFlashFpgaEnabled();
     updateA2600Enabled();
   }
@@ -10216,7 +10270,7 @@ function initFlashPage(doc = document) {
   els.fpgaTarget.addEventListener("change", updateFlashFpgaEnabled);
   function updateFlashEsp32Enabled() {
     const hasFirmware = Boolean(bundledFirmware) || Boolean(els.esp32File.files[0]) && esp32ImageType === "esp32";
-    els.btnFlashEsp32.disabled = !(serialPort && hasFirmware);
+    els.btnFlashEsp32.disabled = !hasFirmware;
   }
   function updateFlashFpgaEnabled() {
     const isRecovery = els.fpgaTarget.value === "/fpga-recover";
@@ -10248,6 +10302,7 @@ function initFlashPage(doc = document) {
         "ok"
       );
       updateFlashEsp32Enabled();
+      els.btnSendWifi.disabled = false;
     } catch (err2) {
       log(`Connect failed: ${err2.message}`);
       setStatus(els.statusEsp32, `Connect failed: ${err2.message}`, "error");
@@ -10255,7 +10310,25 @@ function initFlashPage(doc = document) {
   });
   els.btnFlashEsp32.addEventListener("click", async () => {
     const customFile = els.esp32File.files[0];
-    if (!serialPort || !(customFile || bundledFirmware)) return;
+    if (!(customFile || bundledFirmware)) return;
+    const installSsid = els.installSsid.value.trim();
+    const installPass = els.installPass.value;
+    if (installSsid && (new TextEncoder().encode(installSsid).length > 32 || new TextEncoder().encode(installPass).length > 63)) {
+      setStatus(els.statusEsp32, "WiFi name must be at most 32 bytes and password at most 63.", "error");
+      return;
+    }
+    if (!serialPort) {
+      try {
+        serialPort = await navigator.serial.requestPort();
+        reader = new SerialLineReader(serialPort);
+        wireReaderEvents();
+        log("Serial port selected.");
+      } catch (err2) {
+        log(`Connect failed: ${err2.message}`);
+        setStatus(els.statusEsp32, `Connect failed: ${err2.message}`, "error");
+        return;
+      }
+    }
     els.btnFlashEsp32.disabled = true;
     els.btnConnect.disabled = true;
     els.progressEsp32.hidden = false;
@@ -10281,6 +10354,10 @@ function initFlashPage(doc = document) {
         data = seeded;
         log("Seeded otadata (boot FPGA-Companion in ota_0) and loader last_slot=0 into the image.");
       }
+      if (installSsid) {
+        data = provisionMergedImage(data, { ssid: installSsid, password: installPass });
+        log("Added your WiFi settings to the image; they are written in the same USB session.");
+      }
       await closeSerialSession();
       await flashEsp32(serialPort, data, {
         onLog: log,
@@ -10289,15 +10366,50 @@ function initFlashPage(doc = document) {
           els.progressEsp32.querySelector(".progress-bar").style.width = `${pct}%`;
         }
       });
+      const previousPort = serialPort;
       await closeSerialSession();
       awaitingReconnect = true;
       log("ESP32 write complete; USB serial port closed.");
-      setStatus(els.statusEsp32, "ESP32 flashed.", "ok");
       els.btnSendWifi.disabled = false;
-      setStatus(els.statusWifi, "Board rebooting automatically. USB serial port closed.");
+      els.btnConnect.disabled = false;
+      updateFlashEsp32Enabled();
+      if (!installSsid) {
+        setStatus(
+          els.statusEsp32,
+          "ESP32 flashed. The board is restarting into FPGA-Companion. No WiFi was set; add it under Advanced tools if you want Steps 2 and 3.",
+          "ok"
+        );
+      } else {
+        setStatus(els.statusEsp32, "ESP32 flashed with your WiFi settings. The board is restarting and joining WiFi\u2026", "ok");
+        const ipSeqBefore = ipSeq;
+        installAwaitingIp = true;
+        try {
+          await waitForUsbPort(previousPort);
+          await startSerialListenerWithRetry();
+          if (!await waitForNewIp(ipSeqBefore, 3e4)) {
+            setStatus(
+              els.statusEsp32,
+              "ESP32 flashed and WiFi saved, but the board hasn't reported an IP yet. Check the WiFi name and password (2.4 GHz only), then use Find My IP under Advanced tools.",
+              "error"
+            );
+          }
+        } catch (err2) {
+          log(`Listening for the board's IP failed: ${err2.message}`);
+          setStatus(
+            els.statusEsp32,
+            `ESP32 flashed and WiFi saved, but the page lost the USB connection (${err2.message}). Use Find My IP under Advanced tools.`,
+            "error"
+          );
+        } finally {
+          installAwaitingIp = false;
+        }
+      }
     } catch (err2) {
       log(`Flash failed: ${err2.message}`);
       setStatus(els.statusEsp32, `Flash failed: ${err2.message}`, "error");
+      els.btnConnect.disabled = false;
+      updateFlashEsp32Enabled();
+    } finally {
       els.btnConnect.disabled = false;
       updateFlashEsp32Enabled();
     }
@@ -10377,6 +10489,36 @@ function initFlashPage(doc = document) {
     } finally {
       findIpArmed = false;
       els.btnFindIp.textContent = "Find My IP";
+    }
+  });
+  els.btnResetUsb.addEventListener("click", async () => {
+    els.btnResetUsb.disabled = true;
+    try {
+      if (!serialPort) {
+        serialPort = await navigator.serial.requestPort();
+        reader = new SerialLineReader(serialPort);
+        wireReaderEvents();
+        log("Serial port selected.");
+      }
+      await closeSerialSession();
+      const previousPort = serialPort;
+      awaitingReconnect = true;
+      setStatus(els.statusTools, "Restarting the board\u2026");
+      await resetEsp32ForIp(serialPort, log);
+      await waitForUsbPort(previousPort);
+      await startSerialListenerWithRetry();
+      els.btnSendWifi.disabled = false;
+      setStatus(els.statusTools, "Board restarted. If it has WiFi, its IP appears under Device IP.", "ok");
+    } catch (err2) {
+      awaitingReconnect = false;
+      log(`Restart failed: ${err2.message}`);
+      setStatus(
+        els.statusTools,
+        `Restart failed: ${err2.message} If the board will not respond, unplug the USB cable and plug it back in (hold BOOT while plugging in for the most reliable start).`,
+        "error"
+      );
+    } finally {
+      els.btnResetUsb.disabled = false;
     }
   });
   function updateFpgaProgress(loaded, total) {
@@ -10484,9 +10626,15 @@ function initFlashPage(doc = document) {
         throw new Error(`FPGA-Companion did not answer at ${deviceIp}. Check the board is on WiFi, then retry.`);
       }
       setStatus(els.statusRom, "Uploading the Papilio Splash demo ROM\u2026");
-      const responseText = await uploadRomOta(otaPoster, deviceIp, bundledA2600Rom.fileName, data.buffer, updateRomProgress);
+      const responseText = await uploadRomOta(otaPoster, deviceIp, bundledA2600Rom.fileName, data.buffer, updateRomProgress, OTA_PORT, { location: "root" });
       log(responseText);
-      setStatus(els.statusRom, "Papilio Splash ROM uploaded and inserted. A FAT-formatted SD card is required.", "ok");
+      const savedPath = responseText.match(/->\s+([^\r\n]+)/)?.[1]?.trim();
+      const savedPathParts = (savedPath || "").split("/").filter(Boolean);
+      const savedAtRoot = savedPathParts[savedPathParts.length - 1] === bundledA2600Rom.fileName && (savedPathParts.length === 1 || savedPathParts.length === 2 && savedPathParts[0] === "sd");
+      if (!savedAtRoot) {
+        throw new Error("This FPGA-Companion firmware did not save the ROM to the SD-card root. Update FPGA-Companion to a version that supports root uploads, then retry.");
+      }
+      setStatus(els.statusRom, "Papilio Splash ROM saved to the SD-card root and inserted. It will load again after reboot. A FAT-formatted SD card is required.", "ok");
     } catch (err2) {
       log(`ROM upload failed: ${err2.message}`);
       const hint = /HTTP 5\d\d|f_open|SD/i.test(err2.message) ? " Make sure a FAT-formatted microSD card is inserted in the board." : "";

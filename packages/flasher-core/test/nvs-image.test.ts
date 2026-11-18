@@ -6,6 +6,7 @@ import {
   buildOtadataSelectingSlot,
   crc32,
   parsePartitionTable,
+  provisionMergedImage,
   seedBootSelectionInMergedImage,
 } from "../src/nvs-image.js";
 
@@ -86,5 +87,36 @@ describe("nvs-image", () => {
     expect(seedBootSelectionInMergedImage(seeded!)).toBeNull();
     image[0x100000] = 0xff;
     expect(seedBootSelectionInMergedImage(image)).toBeNull();
+  });
+
+  it("writes WiFi settings and boot selection into a merged image in one go", () => {
+    const image = new Uint8Array(0x100010).fill(0xff);
+    image.set(partitionEntry("nvs_loader", 1, 0x02, 0x9000, 0x3000), 0x8000);
+    image.set(partitionEntry("otadata", 1, 0x00, 0xc000, 0x2000), 0x8020);
+    image.set(partitionEntry("nvs", 1, 0x02, 0xe000, 0x6000), 0x8040);
+    image.set(partitionEntry("ota_0", 0, 0x10, 0x100000, 0x180000), 0x8060);
+    image[0x100000] = 0xe9;
+
+    const out = provisionMergedImage(image, { ssid: "net", password: "pw" });
+    const regions = buildBoardProvisioningRegions(parsePartitionTable(image.subarray(0x8000, 0x8000 + 0xc00)), {
+      ssid: "net",
+      password: "pw",
+    });
+    expect(regions.length).toBe(3);
+    for (const r of regions) {
+      expect(Buffer.from(out.subarray(r.address, r.address + r.data.length)).equals(Buffer.from(r.data))).toBe(true);
+    }
+    // The app and the rest of the image are untouched, and the input is not modified.
+    expect(out[0x100000]).toBe(0xe9);
+    expect(image[0xe000]).toBe(0xff);
+  });
+
+  it("refuses images that are not merged images or do not cover the settings area", () => {
+    expect(() => provisionMergedImage(new Uint8Array(0x1000), { ssid: "a", password: "b" })).toThrow(/merged image/);
+    const short = new Uint8Array(0x8000 + 0xc00).fill(0xff);
+    short.set(partitionEntry("otadata", 1, 0x00, 0xc000, 0x2000), 0x8000);
+    short.set(partitionEntry("nvs", 1, 0x02, 0xe000, 0x6000), 0x8020);
+    short.set(partitionEntry("ota_0", 0, 0x10, 0x100000, 0x180000), 0x8040);
+    expect(() => provisionMergedImage(short, { ssid: "a", password: "b" })).toThrow(/does not cover/);
   });
 });
