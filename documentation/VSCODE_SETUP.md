@@ -41,7 +41,7 @@ This workspace can also be configured with `.vscode/settings.json` for stdio mod
 ### 1. Install the Package (One Time)
 
 ```bash
-cd papilio-loader-mcp
+cd papilio-loader
 
 # Using uv (recommended)
 uv venv

@@ -4,7 +4,7 @@
 #define MyAppName "Papilio Loader"
 #define MyAppVersion "0.4.0"
 #define MyAppPublisher "Gadget Factory"
-#define MyAppURL "https://github.com/Papilio-Labs/papilio-loader-mcp"
+#define MyAppURL "https://github.com/Papilio-Labs/papilio-loader"
 #define MyAppExeName "PapilioLoader.exe"
 
 [Setup]

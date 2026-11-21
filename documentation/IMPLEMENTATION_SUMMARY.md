@@ -97,7 +97,7 @@ This document summarizes the desktop application implementation for Papilio Load
 ## File Structure
 
 ```
-papilio-loader-mcp/
+papilio-loader/
 ├── src/papilio_loader_mcp/
 │   ├── desktop.py          # Desktop app coordinator (NEW)
 │   ├── tray.py             # System tray integration (NEW)

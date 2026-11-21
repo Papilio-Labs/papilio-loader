@@ -28,7 +28,7 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout papilio-loader-mcp
+      - name: Checkout papilio-loader
         uses: actions/checkout@v4
 
       - name: Set up Node.js
@@ -69,12 +69,12 @@ jobs:
         working-directory: papilioworks.com
         run: |
           set -euo pipefail
-          git config user.name "papilio-loader-mcp-bot"
+          git config user.name "papilio-loader-bot"
           git config user.email "actions@users.noreply.github.com"
           git add -A -- getting-started board-recovery loader css
           if git diff --cached --quiet; then
             echo "No changes to board-recovery/, getting-started/, loader/, or css/ — nothing to sync."
             exit 0
           fi
-          git commit -m "board-recovery+loader: sync web build from papilio-loader-mcp@${GITHUB_SHA::7}"
+          git commit -m "board-recovery+loader: sync web build from papilio-loader@${GITHUB_SHA::7}"
           git push

@@ -88,7 +88,7 @@ class SystemTrayApp:
     
     def show_about(self, icon=None, item=None):
         """Show about information (opens GitHub page)."""
-        webbrowser.open('https://github.com/Papilio-Labs/papilio-loader-mcp')
+        webbrowser.open('https://github.com/Papilio-Labs/papilio-loader')
     
     def stop_server(self, icon=None, item=None):
         """Stop the server and exit the application."""

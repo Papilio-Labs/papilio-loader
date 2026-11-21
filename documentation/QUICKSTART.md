@@ -4,8 +4,8 @@
 
 ```powershell
 # Clone and setup
-git clone https://github.com/papilio-labs/papilio-loader-mcp.git
-cd papilio-loader-mcp
+git clone https://github.com/papilio-labs/papilio-loader.git
+cd papilio-loader
 git submodule update --init --recursive
 
 # Install dependencies

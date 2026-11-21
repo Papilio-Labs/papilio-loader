@@ -15,8 +15,8 @@ Quick reference guide for building the desktop application.
 
 ```powershell
 # Clone and setup
-git clone https://github.com/Papilio-Labs/papilio-loader-mcp.git
-cd papilio-loader-mcp
+git clone https://github.com/Papilio-Labs/papilio-loader.git
+cd papilio-loader
 
 # Install dependencies
 pip install -e .[desktop]

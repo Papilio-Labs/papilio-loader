@@ -206,7 +206,7 @@ Used throughout application
 ## File Organization
 
 ```
-papilio-loader-mcp/
+papilio-loader/
 │
 ├── start_combined_server.py    ← Entry point (combines everything)
 ├── start.ps1                    ← Convenience script
