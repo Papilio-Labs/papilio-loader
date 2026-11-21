@@ -112,3 +112,4 @@ release_v*/
 
 node_modules/.bin/mkdirp.cmd
 uploads/1766594301040-143812832-blink_led.bin
+.mcp.json
