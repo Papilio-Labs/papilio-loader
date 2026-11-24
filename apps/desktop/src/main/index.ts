@@ -288,7 +288,7 @@ app.whenReady().then(async () => {
   createTray();
 
   try {
-    mcpServerHandle = await startHttpMcpServer(MCP_HTTP_PORT);
+    mcpServerHandle = await startHttpMcpServer(MCP_HTTP_PORT, app.getPath("appData"));
   } catch (err) {
     console.error(`MCP HTTP server failed to start on port ${MCP_HTTP_PORT}:`, err);
   }

@@ -32,18 +32,32 @@ export async function flashEsp32Ota(
 // set the boot partition back to whatever ota slot it wasn't just writing
 // (loader_get_resume_partition()) and reboot into it, without flashing
 // anything.
-export async function resumeEsp32Ota(ip: string, port: number = OTA_PORT): Promise<string> {
-  const res = await fetch(`http://${ip}:${port}/resume`, { method: "POST" });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => res.statusText)}`);
-  return res.text();
+export async function resumeEsp32Ota(ip: string, port: number = OTA_PORT, timeoutMs = 10000): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://${ip}:${port}/resume`, { method: "POST", signal: controller.signal });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
+    return body;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // GET /update-target — reports which ota slot a subsequent POST /update
 // would write to, so the UI can show it before the user commits.
-export async function fetchUpdateTarget(ip: string, port: number = OTA_PORT): Promise<string> {
-  const res = await fetch(`http://${ip}:${port}/update-target`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => res.statusText)}`);
-  return res.text();
+export async function fetchUpdateTarget(ip: string, port: number = OTA_PORT, timeoutMs = 3000): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://${ip}:${port}/update-target`, { signal: controller.signal });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
+    return body;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // GET / — both the loader and FPGA-Companion (post-Phase-6) serve a plain
@@ -54,7 +68,9 @@ export async function fetchDeviceStatusText(ip: string, port: number = OTA_PORT,
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`http://${ip}:${port}/`, { signal: controller.signal });
-    return res.text();
+    const body = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
+    return body;
   } finally {
     clearTimeout(timeout);
   }

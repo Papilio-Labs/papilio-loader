@@ -76,4 +76,25 @@ describe("flashFpgaOverSerial", () => {
     ).rejects.toThrow(/Board rejected request/);
     reader.stop();
   });
+
+  it("registers the cumulative progress waiter before writing each flash chunk", async () => {
+    const port = new MockSerialPort();
+    const reader = new SerialLineReader(port);
+    await reader.start();
+
+    let command = true;
+    port.onWrite = (chunk) => {
+      if (command) {
+        command = false;
+        port.emit("READY");
+      } else {
+        port.emit(`PROGRESS ${chunk.byteLength}`);
+      }
+    };
+
+    await expect(
+      flashFpgaOverSerial(port, reader, "flash", new Uint8Array(4096 + 4), () => {})
+    ).rejects.toThrow(/Unexpected progress acknowledgement/);
+    reader.stop();
+  });
 });

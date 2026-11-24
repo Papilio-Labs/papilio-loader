@@ -1,4 +1,10 @@
-# OTA (Over-The-Air) Update Feature
+# Legacy Python OTA (Over-The-Air) Update Feature
+
+> **Scope:** This document describes the separate Python MCP/API package's OTA
+> behavior and does not describe the TypeScript/Electron MCP contract introduced
+> in version 0.5.0. Electron MCP uploads require a positively identified
+> resident loader and default to raw application images. See
+> [MCP Resident-Loader Uploads](MCP_RESIDENT_LOADER.md).
 
 ## Overview
 

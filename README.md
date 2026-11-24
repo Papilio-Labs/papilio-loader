@@ -2,6 +2,10 @@
 
 Papilio Loader programs Papilio boards with FPGA bitstreams and ESP32 firmware. Use the Electron desktop application or the no-install browser-based Web Edition for USB and network-based workflows. MCP is an optional interface: the Electron app includes an MCP server, and a separate Python package remains available for Python-based workflows.
 
+The Electron MCP server's resident-loader upload contract is documented in
+[MCP Resident Loader Uploads](documentation/MCP_RESIDENT_LOADER.md). This is a
+behavior change in version 0.5.0; the separate Python MCP package is unchanged.
+
 ## Desktop Application
 
 The Electron desktop loader restores the **Saved Files Library** (save/load,
@@ -274,14 +278,19 @@ The server provides these MCP tools:
 - `list_serial_ports`: List all available COM ports
 - `get_device_info`: Query device information (FPGA/ESP32)
 - `get_flash_status`: Get flash memory status and info
-- `flash_device`: Flash firmware to device with verification via USB/serial
+- `flash_device`: Upload raw ESP32 apps to the loader-selected OTA slot or
+  FPGA images to persistent flash/SRAM. ESP merged provisioning images require
+  explicit `mode="provision"`; see the resident-loader guide.
+- `enter_bootloader`: Positively identify or explicitly enter the resident loader
+- `resume_application`: Resume the selected app from an identified loader
 
 ### OTA (Over-The-Air) Programming
 - `discover_ota_devices`: Scan local network for OTA-capable devices (HTTP endpoint on port 3232)
 - `check_device_ip`: Check if a specific IP address has an OTA endpoint available
-- `flash_device_ota`: Flash ESP32 firmware or FPGA bitstream via WiFi/network
+- `flash_device_ota`: Upload through HTTP only after positively identifying the
+  resident loader (optional USB-assisted entry must be explicitly requested)
 
-### OTA Usage Examples
+### Legacy Python-package OTA Usage Examples
 
 **Discover devices on network:**
 ```python
@@ -314,11 +323,10 @@ flash_device_ota(
 )
 ```
 
-**Note:** OTA flashing requires:
-- Device must be running firmware with HTTP OTA server on port 3232
-- Device must be connected to same network
-- ESP32 OTA endpoint: `POST http://IP:3232/update`
-- FPGA OTA endpoint: `POST http://IP:3232/fpga-update`
+**Note:** The Electron MCP tools require the resident loader on port 3232;
+they may request a supported app's `/goto-loader` handoff. Full-image readback
+verification is not supported. The legacy Python package has separate behavior;
+see [OTA_FEATURE.md](documentation/OTA_FEATURE.md).
 
 ## Development
 

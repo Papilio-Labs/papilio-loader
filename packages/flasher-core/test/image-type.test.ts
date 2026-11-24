@@ -1,11 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { detectBinaryImageType, isEsp32Image, isGowinFpgaBitstream } from "../src/image-type.js";
+import {
+  detectBinaryImageType,
+  isEsp32Image,
+  isGowinFpgaBitstream,
+  validateFpgaBitstream,
+  validateRawEsp32AppImage,
+} from "../src/image-type.js";
 
 function gowinSample(): Uint8Array {
   const data = new Uint8Array(32);
   data.fill(0xff, 0, 22);
   data[22] = 0xa5;
   data[23] = 0xc3;
+  return data;
+}
+
+function appSample(): Uint8Array {
+  const data = new Uint8Array(65);
+  data[0] = 0xe9;
+  data[1] = 1;
+  new DataView(data.buffer).setUint32(28, 32, true);
   return data;
 }
 
@@ -36,5 +50,17 @@ describe("binary image detection", () => {
     data[0] = 0xe9;
 
     expect(isGowinFpgaBitstream(data)).toBe(false);
+  });
+
+  it("rejects empty and structurally truncated resident images before upload", () => {
+    expect(() => validateRawEsp32AppImage(new Uint8Array())).toThrow(/raw application/);
+    const truncated = new Uint8Array(33);
+    truncated[0] = 0xe9;
+    truncated[1] = 1;
+    new DataView(truncated.buffer).setUint32(28, 64, true);
+    expect(() => validateRawEsp32AppImage(truncated)).toThrow(/truncated/);
+    expect(() => validateRawEsp32AppImage(appSample())).not.toThrow();
+    expect(() => validateFpgaBitstream(gowinSample())).not.toThrow();
+    expect(() => validateFpgaBitstream(new Uint8Array())).toThrow(/valid Gowin/);
   });
 });

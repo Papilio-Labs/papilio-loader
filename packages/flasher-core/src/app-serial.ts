@@ -5,17 +5,38 @@
 // Phase 7 (host tooling) -- Phase 4 only ported the firmware side, the host
 // tooling kept using a full esptool merged-image flash instead.
 //
-// No per-chunk flow control is needed here (unlike fpga-serial.ts's
-// target=flash path): the loader's 64KB USB-serial RX ring buffer easily
-// keeps up with esp_ota_write()'s flash-DMA writes (see the Phase 4
-// findings in papilio-esp-bootloader-phase1-rollback-findings repo memory
-// -- the slow consumer that needed per-chunk ACKs was the JTAG bit-bang
-// path, not this one).
 import type { SerialLike } from "./transport.js";
 import type { SerialLineReader } from "./serial-log.js";
 import type { ProgressCallback } from "./fpga-serial.js";
 
-const CHUNK = 16384;
+const CHUNK = 4096;
+const MAX_APP_SIZE = 0x180000;
+
+export interface SerialUploadResult {
+  bytesAcknowledged: number;
+  completionAcknowledged: true;
+}
+
+function expectProgress(
+  reader: SerialLineReader,
+  expectedEnd: number,
+  timeoutMs: number,
+  protocol: "APP_FLASH" | "FPGA_FLASH",
+  signal: AbortSignal
+): Promise<string> {
+  return reader.waitForLine(
+    new RegExp(`^PROGRESS \\d+$|^${protocol}_ERROR .+`),
+    timeoutMs,
+    undefined,
+    signal
+  ).then((line) => {
+    if (line.startsWith(`${protocol}_ERROR `)) throw new Error(`Board reported: ${line}`);
+    if (line !== `PROGRESS ${expectedEnd}`) {
+      throw new Error(`Unexpected progress acknowledgement: expected ${expectedEnd} bytes, received "${line}".`);
+    }
+    return line;
+  });
+}
 
 export async function resumeAppOverSerial(port: SerialLike, reader: SerialLineReader): Promise<void> {
   if (!port) throw new Error("No USB serial port connected.");
@@ -23,14 +44,17 @@ export async function resumeAppOverSerial(port: SerialLike, reader: SerialLineRe
   if (!port.writable) throw new Error("No USB serial port connected.");
 
   const writer = port.writable.getWriter();
+  const controller = new AbortController();
   try {
-    const resultPromise = reader.waitForLine(/^RESUME_OK$|^RESUME_ERROR /, 10000);
+    const resultPromise = reader.waitForLine(/^RESUME_OK$|^RESUME_ERROR /, 10000, undefined, controller.signal);
+    void resultPromise.catch(() => {});
     await writer.write(new TextEncoder().encode("RESUME_APP\n"));
     const resultLine = await resultPromise;
     if (resultLine.startsWith("RESUME_ERROR")) {
       throw new Error(`Board reported: ${resultLine}`);
     }
   } finally {
+    controller.abort(new Error("Serial resume request ended."));
     writer.releaseLock();
   }
 }
@@ -40,44 +64,53 @@ export async function flashEsp32OverSerial(
   reader: SerialLineReader,
   data: Uint8Array,
   onProgress: ProgressCallback
-): Promise<void> {
+): Promise<SerialUploadResult> {
   if (!port) throw new Error("No USB serial port connected.");
   if (!reader.isRunning) await reader.start();
   if (!port.writable) throw new Error("No USB serial port connected.");
 
   const size = data.byteLength;
+  if (size === 0 || size > MAX_APP_SIZE) {
+    throw new Error(`ESP32 app image must contain 1 to ${MAX_APP_SIZE} bytes.`);
+  }
   const encoder = new TextEncoder();
   const writer = port.writable.getWriter();
+  const controller = new AbortController();
 
   try {
-    const readyPromise = reader.waitForLine(/^READY$|^APP_FLASH_ERROR /, 10000);
+    const readyPromise = reader.waitForLine(/^READY$|^APP_FLASH_ERROR /, 10000, undefined, controller.signal);
+    void readyPromise.catch(() => {});
     await writer.write(encoder.encode(`APP_FLASH_BEGIN ${size}\n`));
     const readyLine = await readyPromise;
     if (readyLine.startsWith("APP_FLASH_ERROR")) {
       throw new Error(`Board rejected request: ${readyLine}`);
     }
 
-    // Board reboots automatically on success, so the final line may never
-    // arrive if the USB port re-enumerates first -- give it a generous
-    // window, but a caller's own onDisconnect handling is the real signal.
-    const donePromise = reader.waitForLine(/^APP_FLASH_OK$|^APP_FLASH_ERROR /, 60000, (line) => {
-      const m = line.match(/^PROGRESS (\d+)/);
-      if (m) onProgress(parseInt(m[1], 10), size);
-    });
-
     for (let offset = 0; offset < size; offset += CHUNK) {
-      // slice() (copy), not subarray() (view) -- write() detaches the
-      // underlying buffer, invalidating any other view into the same
-      // source ArrayBuffer after the first write() call.
-      await writer.write(data.slice(offset, Math.min(offset + CHUNK, size)));
+      const end = Math.min(offset + CHUNK, size);
+      const ackPromise = expectProgress(reader, end, offset === 0 ? 120000 : 20000, "APP_FLASH", controller.signal);
+      void ackPromise.catch(() => {});
+      const donePromise =
+        end === size
+          ? reader.waitForLine(/^APP_FLASH_OK$|^APP_FLASH_ERROR /, 60000, undefined, controller.signal)
+          : null;
+      if (donePromise) void donePromise.catch(() => {});
+
+      await writer.write(data.slice(offset, end));
+      await ackPromise;
+      onProgress(end, size);
+
+      if (donePromise) {
+        const resultLine = await donePromise;
+        if (resultLine.startsWith("APP_FLASH_ERROR")) {
+          throw new Error(`Board reported: ${resultLine}`);
+        }
+      }
     }
 
-    const resultLine = await donePromise;
-    if (resultLine.startsWith("APP_FLASH_ERROR")) {
-      throw new Error(`Board reported: ${resultLine}`);
-    }
-    onProgress(size, size);
+    return { bytesAcknowledged: size, completionAcknowledged: true };
   } finally {
+    controller.abort(new Error("Serial app upload ended."));
     writer.releaseLock();
   }
 }

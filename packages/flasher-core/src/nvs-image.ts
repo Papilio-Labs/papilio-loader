@@ -42,6 +42,17 @@ export interface PartitionEntry {
   size: number;
 }
 
+export const SUPPORTED_LOADER_PARTITIONS: ReadonlyArray<PartitionEntry> = [
+  { label: "nvs_loader", type: 0x01, subtype: 0x02, offset: 0x9000, size: 0x3000 },
+  { label: "otadata", type: 0x01, subtype: 0x00, offset: 0xc000, size: 0x2000 },
+  { label: "nvs", type: 0x01, subtype: 0x02, offset: 0xe000, size: 0x6000 },
+  { label: "factory", type: 0x00, subtype: 0x00, offset: 0x20000, size: 0xe0000 },
+  { label: "ota_0", type: 0x00, subtype: 0x10, offset: 0x100000, size: 0x180000 },
+  { label: "ota_1", type: 0x00, subtype: 0x11, offset: 0x280000, size: 0x180000 },
+];
+
+export type DigestFunction = (data: Uint8Array) => Uint8Array;
+
 export function parsePartitionTable(table: Uint8Array): PartitionEntry[] {
   const view = new DataView(table.buffer, table.byteOffset, table.byteLength);
   const entries: PartitionEntry[] = [];
@@ -58,6 +69,96 @@ export function parsePartitionTable(table: Uint8Array): PartitionEntry[] {
     });
   }
   return entries;
+}
+
+export function validateSupportedLoaderPartitionTable(table: Uint8Array, md5: DigestFunction): PartitionEntry[] {
+  let checksumOffset = -1;
+  for (let offset = 0; offset + 32 <= table.length; offset += 32) {
+    if (table[offset] === 0xeb && table[offset + 1] === 0xeb) {
+      checksumOffset = offset;
+      break;
+    }
+    if (table[offset] !== 0xaa || table[offset + 1] !== 0x50) {
+      throw new Error("Partition table is missing its MD5 checksum record.");
+    }
+  }
+  if (checksumOffset < 0) throw new Error("Partition table is missing its MD5 checksum record.");
+
+  const checksumRecord = table.subarray(checksumOffset, checksumOffset + 32);
+  if (!checksumRecord.subarray(2, 16).every((byte) => byte === 0xff)) {
+    throw new Error("Partition table MD5 checksum record is malformed.");
+  }
+  const expectedMd5 = checksumRecord.subarray(16, 32);
+  const actualMd5 = md5(table.subarray(0, checksumOffset));
+  if (actualMd5.length !== expectedMd5.length || !actualMd5.every((byte, index) => byte === expectedMd5[index])) {
+    throw new Error("Partition table MD5 checksum does not match.");
+  }
+  if (!table.subarray(checksumOffset + 32).every((byte) => byte === 0xff)) {
+    throw new Error("Unexpected data follows the partition table checksum record.");
+  }
+
+  const entries = parsePartitionTable(table.subarray(0, checksumOffset));
+  if (entries.length !== SUPPORTED_LOADER_PARTITIONS.length) {
+    throw new Error(`Unsupported partition table: expected ${SUPPORTED_LOADER_PARTITIONS.length} entries.`);
+  }
+  for (const required of SUPPORTED_LOADER_PARTITIONS) {
+    const entry = entries.find((candidate) => candidate.label === required.label);
+    if (
+      !entry ||
+      entry.type !== required.type ||
+      entry.subtype !== required.subtype ||
+      entry.offset !== required.offset ||
+      entry.size !== required.size
+    ) {
+      throw new Error(`Unsupported partition table entry "${required.label}".`);
+    }
+  }
+  return entries;
+}
+
+export function validatePapilioLoaderFactoryImage(data: Uint8Array, minimumVersion = "0.1.2"): string {
+  const descriptorOffset = 0x20;
+  const descriptorSize = 0x80;
+  if (data.length < descriptorOffset + descriptorSize || data[0] !== 0xe9) {
+    throw new Error("Factory partition does not contain a complete ESP application image.");
+  }
+  const descriptor = data.subarray(descriptorOffset, descriptorOffset + descriptorSize);
+  const view = new DataView(descriptor.buffer, descriptor.byteOffset, descriptor.byteLength);
+  if (view.getUint32(0, true) !== 0xabcd5432) {
+    throw new Error("Factory application descriptor is missing or invalid.");
+  }
+  const readField = (start: number, length: number) =>
+    new TextDecoder().decode(descriptor.subarray(start, start + length)).split("\0", 1)[0].trim();
+  const version = readField(16, 32);
+  const projectName = readField(48, 32);
+  if (projectName !== "papilio_esp_bootloader") {
+    throw new Error(`Unsupported factory application "${projectName || "unknown"}".`);
+  }
+
+  const parseVersion = (value: string): number[] | null => {
+    const match = value.match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+    return match ? match.slice(1).map(Number) : null;
+  };
+  const actual = parseVersion(version);
+  const minimum = parseVersion(minimumVersion);
+  const comparison = actual && minimum
+    ? actual.reduce((result, part, index) => result || Math.sign(part - minimum[index]), 0)
+    : null;
+  if (comparison === null || comparison < 0) {
+    throw new Error(`Loader version ${version || "unknown"} is older than supported version ${minimumVersion}.`);
+  }
+  return version;
+}
+
+export function validateMergedLoaderImage(data: Uint8Array, md5: DigestFunction): void {
+  if (data.length !== 0x400000 || data[0] !== 0xe9) {
+    throw new Error("Provisioning requires a complete 4 MB merged ESP image.");
+  }
+  const table = data.subarray(0x8000, 0x8000 + 0xc00);
+  const entries = validateSupportedLoaderPartitionTable(table, md5);
+  const factory = entries.find((entry) => entry.label === "factory");
+  if (!factory) throw new Error("Merged image has no factory partition.");
+  validatePapilioLoaderFactoryImage(data.subarray(factory.offset, factory.offset + 0x100), "0.1.2");
 }
 
 export type NvsValue = { type: "u8"; value: number } | { type: "string"; value: string };

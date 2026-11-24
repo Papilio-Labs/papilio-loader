@@ -38,8 +38,8 @@ describe("flashEsp32OverSerial", () => {
     await flashEsp32OverSerial(port, reader, data, (loaded, total) => progress.push([loaded, total]));
 
     expect(progress[progress.length - 1]).toEqual([data.byteLength, data.byteLength]);
-    // command line + 3 data chunks (2 full 16KB + 1 partial)
-    expect(port.writes.length).toBe(4);
+    // command line + nine 4KB-or-smaller data chunks
+    expect(port.writes.length).toBe(10);
     reader.stop();
   });
 
@@ -72,6 +72,26 @@ describe("flashEsp32OverSerial", () => {
     };
 
     await expect(flashEsp32OverSerial(port, reader, new Uint8Array(10), () => {})).rejects.toThrow(/Board reported/);
+    reader.stop();
+  });
+
+  it("registers each progress waiter before writing and rejects a wrong cumulative ack", async () => {
+    const port = new MockSerialPort();
+    const reader = new SerialLineReader(port);
+    await reader.start();
+
+    let command = true;
+    port.onWrite = () => {
+      if (command) {
+        command = false;
+        port.emit("READY");
+      } else {
+        port.emit("PROGRESS 1");
+      }
+    };
+
+    await expect(flashEsp32OverSerial(port, reader, new Uint8Array(64), () => {}))
+      .rejects.toThrow(/Unexpected progress acknowledgement/);
     reader.stop();
   });
 });

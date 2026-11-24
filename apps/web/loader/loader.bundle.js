@@ -2167,6 +2167,14 @@ var init_esp32p4 = __esm({
   }
 });
 
+// ../../packages/flasher-core/dist/transport.js
+var SerialDisconnectError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SerialDisconnectError";
+  }
+};
+
 // ../../packages/flasher-core/dist/serial-log.js
 var SerialLineReader = class {
   port;
@@ -2234,6 +2242,8 @@ var SerialLineReader = class {
           }
         }
       } catch (err2) {
+        const message = err2 instanceof Error ? err2.message : "Serial read failed.";
+        this.rejectWaiters(new SerialDisconnectError(`Serial read failed: ${message}`));
       } finally {
         const disconnected = !this.stopped;
         this.stopped = true;
@@ -2242,6 +2252,7 @@ var SerialLineReader = class {
         } catch {
         }
         if (disconnected) {
+          this.rejectWaiters(new SerialDisconnectError("Serial device disconnected."));
           for (const listener of this.disconnectListeners)
             listener();
         }
@@ -2251,10 +2262,13 @@ var SerialLineReader = class {
     })();
   }
   async stop() {
+    const wasRunning = !this.stopped;
     this.stopped = true;
     this.reader?.cancel().catch(() => {
     });
     await this.loopDone;
+    if (wasRunning)
+      this.rejectWaiters(new SerialDisconnectError("Serial reader stopped."));
     await Promise.race([this.pipeDone, new Promise((resolve) => setTimeout(resolve, 1e3))]);
   }
   handleLine(line) {
@@ -2262,28 +2276,54 @@ var SerialLineReader = class {
       listener(line);
     for (const waiter of this.waiters.slice()) {
       if (waiter.matchRegex.test(line)) {
-        clearTimeout(waiter.timeoutHandle);
-        this.waiters = this.waiters.filter((w) => w !== waiter);
+        this.removeWaiter(waiter);
         waiter.resolve(line);
       } else if (waiter.onEachLine) {
         waiter.onEachLine(line);
       }
     }
   }
-  waitForLine(matchRegex, timeoutMs, onEachLine) {
+  waitForLine(matchRegex, timeoutMs, onEachLine, signal) {
+    if (this.stopped) {
+      return Promise.reject(new SerialDisconnectError("Serial reader is not running."));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason instanceof Error ? signal.reason : new SerialDisconnectError("Wait cancelled."));
+    }
     return new Promise((resolve, reject) => {
-      const waiter = {
+      let waiter;
+      const timeoutHandle = setTimeout(() => {
+        this.removeWaiter(waiter);
+        reject(new Error(`Timed out waiting for board (expected ${matchRegex})`));
+      }, timeoutMs);
+      waiter = {
         matchRegex,
         onEachLine,
         resolve,
         reject,
-        timeoutHandle: setTimeout(() => {
-          this.waiters = this.waiters.filter((w) => w !== waiter);
-          reject(new Error(`Timed out waiting for board (expected ${matchRegex})`));
-        }, timeoutMs)
+        timeoutHandle,
+        signal
       };
+      const onAbort = () => {
+        this.removeWaiter(waiter);
+        reject(signal?.reason instanceof Error ? signal.reason : new SerialDisconnectError("Wait cancelled."));
+      };
+      waiter.onAbort = onAbort;
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.waiters.push(waiter);
     });
+  }
+  rejectWaiters(error) {
+    for (const waiter of [...this.waiters]) {
+      this.removeWaiter(waiter);
+      waiter.reject(error);
+    }
+  }
+  removeWaiter(waiter) {
+    clearTimeout(waiter.timeoutHandle);
+    if (waiter.onAbort)
+      waiter.signal?.removeEventListener("abort", waiter.onAbort);
+    this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
   }
 };
 
@@ -2329,46 +2369,93 @@ async function flashFpgaOverSerial(port, reader, target, data, onProgress) {
   if (!port.writable)
     throw new Error("No USB serial port connected.");
   const size = data.byteLength;
+  if (size === 0 || size > 2097152) {
+    throw new Error("FPGA image must contain 1 to 2097152 bytes.");
+  }
   const encoder = new TextEncoder();
   const writer = port.writable.getWriter();
+  const controller = new AbortController();
   try {
-    const readyPromise = reader.waitForLine(/^READY$|^FPGA_FLASH_ERROR /, 9e4);
+    const readyPromise = reader.waitForLine(/^READY$|^FPGA_FLASH_ERROR /, 1e4, void 0, controller.signal);
+    void readyPromise.catch(() => {
+    });
     await writer.write(encoder.encode(`FPGA_FLASH_BEGIN ${target} ${size}
 `));
     const readyLine = await readyPromise;
     if (readyLine.startsWith("FPGA_FLASH_ERROR")) {
       throw new Error(`Board rejected request: ${readyLine}`);
     }
-    const donePromise = reader.waitForLine(/^FPGA_FLASH_OK$|^FPGA_FLASH_ERROR /, 18e4, (line) => {
-      const m = line.match(/^PROGRESS (\d+)/);
-      if (m)
-        onProgress(parseInt(m[1], 10), size);
-    });
     if (target === "flash") {
       const CHUNK2 = 4096;
       for (let offset = 0; offset < size; offset += CHUNK2) {
         const end = Math.min(offset + CHUNK2, size);
+        const ackPromise = reader.waitForLine(/^PROGRESS \d+$|^FPGA_FLASH_ERROR /, offset === 0 ? 12e4 : 2e4, void 0, controller.signal);
+        void ackPromise.catch(() => {
+        });
+        const donePromise = end === size ? reader.waitForLine(/^FPGA_FLASH_OK$|^FPGA_FLASH_ERROR /, 18e4, void 0, controller.signal) : null;
+        if (donePromise)
+          void donePromise.catch(() => {
+          });
         await writer.write(data.slice(offset, end));
-        await reader.waitForLine(new RegExp(`^PROGRESS ${end}$|^FPGA_FLASH_ERROR `), 1e4);
+        const ackLine = await ackPromise;
+        if (ackLine.startsWith("FPGA_FLASH_ERROR "))
+          throw new Error(`Board reported: ${ackLine}`);
+        if (ackLine !== `PROGRESS ${end}`) {
+          throw new Error(`Unexpected progress acknowledgement: expected ${end} bytes, received "${ackLine}".`);
+        }
+        onProgress(end, size);
+        if (donePromise) {
+          const resultLine = await donePromise;
+          if (resultLine.startsWith("FPGA_FLASH_ERROR"))
+            throw new Error(`Board reported: ${resultLine}`);
+        }
       }
     } else {
       const CHUNK2 = 16384;
+      const donePromise = reader.waitForLine(/^FPGA_FLASH_OK$|^FPGA_FLASH_ERROR /, 18e4, (line) => {
+        const m = line.match(/^PROGRESS (\d+)/);
+        if (m)
+          onProgress(parseInt(m[1], 10), size);
+      }, controller.signal);
+      void donePromise.catch(() => {
+      });
+      const errorPromise = reader.waitForLine(/^FPGA_FLASH_ERROR /, 18e4, void 0, controller.signal);
+      void errorPromise.catch(() => {
+      });
       for (let offset = 0; offset < size; offset += CHUNK2) {
-        await writer.write(data.slice(offset, Math.min(offset + CHUNK2, size)));
+        const writePromise = writer.write(data.slice(offset, Math.min(offset + CHUNK2, size)));
+        await Promise.race([
+          writePromise.then(() => null),
+          errorPromise.then((line) => {
+            throw new Error(`Board reported: ${line}`);
+          })
+        ]);
       }
-    }
-    const resultLine = await donePromise;
-    if (resultLine.startsWith("FPGA_FLASH_ERROR")) {
-      throw new Error(`Board reported: ${resultLine}`);
+      const resultLine = await donePromise;
+      if (resultLine.startsWith("FPGA_FLASH_ERROR"))
+        throw new Error(`Board reported: ${resultLine}`);
     }
     onProgress(size, size);
+    return { bytesAcknowledged: size, completionAcknowledged: true };
   } finally {
+    controller.abort(new Error("Serial FPGA upload ended."));
     writer.releaseLock();
   }
 }
 
 // ../../packages/flasher-core/dist/app-serial.js
-var CHUNK = 16384;
+var CHUNK = 4096;
+var MAX_APP_SIZE = 1572864;
+function expectProgress(reader, expectedEnd, timeoutMs, protocol, signal) {
+  return reader.waitForLine(new RegExp(`^PROGRESS \\d+$|^${protocol}_ERROR .+`), timeoutMs, void 0, signal).then((line) => {
+    if (line.startsWith(`${protocol}_ERROR `))
+      throw new Error(`Board reported: ${line}`);
+    if (line !== `PROGRESS ${expectedEnd}`) {
+      throw new Error(`Unexpected progress acknowledgement: expected ${expectedEnd} bytes, received "${line}".`);
+    }
+    return line;
+  });
+}
 async function resumeAppOverSerial(port, reader) {
   if (!port)
     throw new Error("No USB serial port connected.");
@@ -2377,14 +2464,18 @@ async function resumeAppOverSerial(port, reader) {
   if (!port.writable)
     throw new Error("No USB serial port connected.");
   const writer = port.writable.getWriter();
+  const controller = new AbortController();
   try {
-    const resultPromise = reader.waitForLine(/^RESUME_OK$|^RESUME_ERROR /, 1e4);
+    const resultPromise = reader.waitForLine(/^RESUME_OK$|^RESUME_ERROR /, 1e4, void 0, controller.signal);
+    void resultPromise.catch(() => {
+    });
     await writer.write(new TextEncoder().encode("RESUME_APP\n"));
     const resultLine = await resultPromise;
     if (resultLine.startsWith("RESUME_ERROR")) {
       throw new Error(`Board reported: ${resultLine}`);
     }
   } finally {
+    controller.abort(new Error("Serial resume request ended."));
     writer.releaseLock();
   }
 }
@@ -2396,30 +2487,44 @@ async function flashEsp32OverSerial(port, reader, data, onProgress) {
   if (!port.writable)
     throw new Error("No USB serial port connected.");
   const size = data.byteLength;
+  if (size === 0 || size > MAX_APP_SIZE) {
+    throw new Error(`ESP32 app image must contain 1 to ${MAX_APP_SIZE} bytes.`);
+  }
   const encoder = new TextEncoder();
   const writer = port.writable.getWriter();
+  const controller = new AbortController();
   try {
-    const readyPromise = reader.waitForLine(/^READY$|^APP_FLASH_ERROR /, 1e4);
+    const readyPromise = reader.waitForLine(/^READY$|^APP_FLASH_ERROR /, 1e4, void 0, controller.signal);
+    void readyPromise.catch(() => {
+    });
     await writer.write(encoder.encode(`APP_FLASH_BEGIN ${size}
 `));
     const readyLine = await readyPromise;
     if (readyLine.startsWith("APP_FLASH_ERROR")) {
       throw new Error(`Board rejected request: ${readyLine}`);
     }
-    const donePromise = reader.waitForLine(/^APP_FLASH_OK$|^APP_FLASH_ERROR /, 6e4, (line) => {
-      const m = line.match(/^PROGRESS (\d+)/);
-      if (m)
-        onProgress(parseInt(m[1], 10), size);
-    });
     for (let offset = 0; offset < size; offset += CHUNK) {
-      await writer.write(data.slice(offset, Math.min(offset + CHUNK, size)));
+      const end = Math.min(offset + CHUNK, size);
+      const ackPromise = expectProgress(reader, end, offset === 0 ? 12e4 : 2e4, "APP_FLASH", controller.signal);
+      void ackPromise.catch(() => {
+      });
+      const donePromise = end === size ? reader.waitForLine(/^APP_FLASH_OK$|^APP_FLASH_ERROR /, 6e4, void 0, controller.signal) : null;
+      if (donePromise)
+        void donePromise.catch(() => {
+        });
+      await writer.write(data.slice(offset, end));
+      await ackPromise;
+      onProgress(end, size);
+      if (donePromise) {
+        const resultLine = await donePromise;
+        if (resultLine.startsWith("APP_FLASH_ERROR")) {
+          throw new Error(`Board reported: ${resultLine}`);
+        }
+      }
     }
-    const resultLine = await donePromise;
-    if (resultLine.startsWith("APP_FLASH_ERROR")) {
-      throw new Error(`Board reported: ${resultLine}`);
-    }
-    onProgress(size, size);
+    return { bytesAcknowledged: size, completionAcknowledged: true };
   } finally {
+    controller.abort(new Error("Serial app upload ended."));
     writer.releaseLock();
   }
 }
@@ -2430,18 +2535,28 @@ async function flashEsp32Ota(poster, ip, data, onProgress, port = OTA_PORT) {
   const url = `http://${ip}:${port}/update`;
   return poster.post(url, data, onProgress);
 }
-async function resumeEsp32Ota(ip, port = OTA_PORT) {
-  const res = await fetch(`http://${ip}:${port}/resume`, { method: "POST" });
-  if (!res.ok)
-    throw new Error(`HTTP ${res.status}: ${await res.text().catch(() => res.statusText)}`);
-  return res.text();
+async function resumeEsp32Ota(ip, port = OTA_PORT, timeoutMs = 1e4) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://${ip}:${port}/resume`, { method: "POST", signal: controller.signal });
+    const body = await res.text();
+    if (!res.ok)
+      throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
+    return body;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 async function fetchDeviceStatusText(ip, port = OTA_PORT, timeoutMs = 1500) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`http://${ip}:${port}/`, { signal: controller.signal });
-    return res.text();
+    const body = await res.text();
+    if (!res.ok)
+      throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
+    return body;
   } finally {
     clearTimeout(timeout);
   }
@@ -9481,7 +9596,8 @@ async function resetEsp32ForIp(port, onLog) {
   }
 }
 async function flashEsp32(port, data, options = {}) {
-  const transport = new Transport(port, true);
+  const transport = new Transport(port);
+  transport.trace = (message) => options.onLog?.(message);
   const loader = new ESPLoader({
     transport,
     baudrate: 115200,
@@ -9494,6 +9610,9 @@ async function flashEsp32(port, data, options = {}) {
   });
   try {
     const chipName = await loader.main();
+    if (options.expectedChipName && loader.chip?.CHIP_NAME !== options.expectedChipName) {
+      throw new Error(`Unsupported provisioning chip "${chipName}"; expected ${options.expectedChipName}.`);
+    }
     options.onLog?.(`Connected to ${chipName}.`);
     await loader.writeFlash({
       fileArray: [{ data, address: 0 }],
@@ -9600,7 +9719,7 @@ var MCP_APP_MARKER = "[MCP] Debug interface ready";
 function classifyBootLogLine(line) {
   if (line.includes(LOADER_MARKER) || line.includes(LOADER_PHASE_MARKER))
     return "loader";
-  if (line.includes(APP_MARKER) || line.includes(MCP_APP_MARKER))
+  if (line.includes(APP_MARKER) || line.includes(MCP_APP_MARKER) || line.includes("Papilio RetroCade - Wishbone System") || /PAPILIO_APP\s+name=|Project name:/i.test(line))
     return "app";
   return null;
 }
@@ -10021,7 +10140,7 @@ function initLoaderPage(doc = document, win = window) {
     appVersion: doc.getElementById("app-version")
   };
   if (els.appVersion) {
-    els.appVersion.textContent = `v${true ? "0.5.1" : "dev"}`;
+    els.appVersion.textContent = `v${true ? "0.6.0" : "dev"}`;
   }
   const log = makeLogger(els.log);
   const otaPoster = createBrowserXhrPoster();

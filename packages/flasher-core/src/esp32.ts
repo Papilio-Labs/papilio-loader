@@ -12,6 +12,7 @@ const PARTITION_TABLE_SIZE = 0xc00;
 export interface Esp32FlashOptions {
   onLog?(message: string): void;
   onProgress?(written: number, total: number): void;
+  expectedChipName?: string;
 }
 
 // esptool-js's own reset strategies (classic RTS toggle, and the
@@ -194,7 +195,8 @@ export async function bootCompanionOverUsb(port: SerialLike, options: { onLog?: 
 // "keep" — read from the merged image's own bootloader header rather than
 // guessed, matching the original SPA's behavior.
 export async function flashEsp32(port: SerialLike, data: Uint8Array, options: Esp32FlashOptions = {}): Promise<Esp32FlashResult> {
-  const transport = new Transport(port as unknown as ConstructorParameters<typeof Transport>[0], true);
+  const transport = new Transport(port as unknown as ConstructorParameters<typeof Transport>[0]);
+  transport.trace = (message) => options.onLog?.(message);
   const loader = new ESPLoader({
     transport,
     baudrate: 115200,
@@ -207,6 +209,9 @@ export async function flashEsp32(port: SerialLike, data: Uint8Array, options: Es
 
   try {
     const chipName = await loader.main();
+    if (options.expectedChipName && loader.chip?.CHIP_NAME !== options.expectedChipName) {
+      throw new Error(`Unsupported provisioning chip "${chipName}"; expected ${options.expectedChipName}.`);
+    }
     options.onLog?.(`Connected to ${chipName}.`);
 
     await loader.writeFlash({

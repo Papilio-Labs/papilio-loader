@@ -74,4 +74,26 @@ describe("SerialLineReader", () => {
     await port.close();
     await vi.waitFor(() => expect(disconnected).toHaveBeenCalledTimes(1));
   });
+
+  it("rejects outstanding protocol waiters when the serial device disconnects", async () => {
+    const port = new MockSerialPort();
+    const reader = new SerialLineReader(port);
+    await reader.start();
+
+    const pending = reader.waitForLine(/^DONE$/, 10000);
+    port.simulateDisconnect();
+
+    await expect(pending).rejects.toThrow(/Serial read failed|disconnected/);
+  });
+
+  it("removes pending protocol waiters when the reader stops", async () => {
+    const port = new MockSerialPort();
+    const reader = new SerialLineReader(port);
+    await reader.start();
+
+    const pending = reader.waitForLine(/^DONE$/, 10000);
+    await reader.stop();
+
+    await expect(pending).rejects.toThrow(/stopped/);
+  });
 });

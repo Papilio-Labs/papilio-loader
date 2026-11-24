@@ -32,7 +32,12 @@ const MCP_APP_MARKER = "[MCP] Debug interface ready";
 // per line of an already-captured boot log.
 export function classifyBootLogLine(line: string): DeviceRole | null {
   if (line.includes(LOADER_MARKER) || line.includes(LOADER_PHASE_MARKER)) return "loader";
-  if (line.includes(APP_MARKER) || line.includes(MCP_APP_MARKER)) return "app";
+  if (
+    line.includes(APP_MARKER) ||
+    line.includes(MCP_APP_MARKER) ||
+    line.includes("Papilio RetroCade - Wishbone System") ||
+    /PAPILIO_APP\s+name=|Project name:/i.test(line)
+  ) return "app";
   return null;
 }
 

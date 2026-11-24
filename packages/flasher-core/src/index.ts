@@ -10,3 +10,4 @@ export * from "./recovery.js";
 export * from "./device-status.js";
 export * from "./image-type.js";
 export * from "./nvs-image.js";
+export * from "./lifecycle.js";

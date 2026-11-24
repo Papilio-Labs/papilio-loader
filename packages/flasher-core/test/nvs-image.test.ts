@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   buildBoardProvisioningRegions,
@@ -8,6 +9,8 @@ import {
   parsePartitionTable,
   provisionMergedImage,
   seedBootSelectionInMergedImage,
+  validatePapilioLoaderFactoryImage,
+  validateSupportedLoaderPartitionTable,
 } from "../src/nvs-image.js";
 
 const fixture = (name: string) => new Uint8Array(readFileSync(new URL(`./fixtures/${name}`, import.meta.url)));
@@ -20,6 +23,35 @@ function partitionEntry(label: string, type: number, subtype: number, offset: nu
   dv.setUint32(8, size, true);
   entry.set(new TextEncoder().encode(label), 12);
   return entry;
+}
+
+function supportedPartitionTable(): Uint8Array {
+  const table = new Uint8Array(0xc00).fill(0xff);
+  const entries = [
+    partitionEntry("nvs_loader", 1, 0x02, 0x9000, 0x3000),
+    partitionEntry("otadata", 1, 0x00, 0xc000, 0x2000),
+    partitionEntry("nvs", 1, 0x02, 0xe000, 0x6000),
+    partitionEntry("factory", 0, 0x00, 0x20000, 0xe0000),
+    partitionEntry("ota_0", 0, 0x10, 0x100000, 0x180000),
+    partitionEntry("ota_1", 0, 0x11, 0x280000, 0x180000),
+  ];
+  entries.forEach((entry, index) => table.set(entry, index * 32));
+  const checksumOffset = entries.length * 32;
+  table[checksumOffset] = 0xeb;
+  table[checksumOffset + 1] = 0xeb;
+  table.set(createHash("md5").update(table.subarray(0, checksumOffset)).digest(), checksumOffset + 16);
+  return table;
+}
+
+function factoryImage(version: string): Uint8Array {
+  const image = new Uint8Array(0x100).fill(0xff);
+  image[0] = 0xe9;
+  image.set([0x32, 0x54, 0xcd, 0xab], 0x20);
+  image.fill(0, 0x30, 0x50);
+  image.fill(0, 0x50, 0x70);
+  image.set(new TextEncoder().encode(version), 0x30);
+  image.set(new TextEncoder().encode("papilio_esp_bootloader"), 0x50);
+  return image;
 }
 
 describe("nvs-image", () => {
@@ -62,6 +94,31 @@ describe("nvs-image", () => {
       [0xc000, 0x2000],
       [0xe000, 0x6000],
     ]);
+  });
+
+  it("validates the supported loader layout and partition-table MD5 record", () => {
+    const table = supportedPartitionTable();
+    const partitions = validateSupportedLoaderPartitionTable(
+      table,
+      (data) => createHash("md5").update(data).digest()
+    );
+    expect(partitions.map((partition) => partition.label)).toEqual([
+      "nvs_loader", "otadata", "nvs", "factory", "ota_0", "ota_1",
+    ]);
+
+    table[0] ^= 1;
+    expect(() => validateSupportedLoaderPartitionTable(
+      table,
+      (data) => createHash("md5").update(data).digest()
+    )).toThrow(/MD5 checksum/);
+  });
+
+  it("requires the supported Papilio loader factory identity and minimum version", () => {
+    expect(validatePapilioLoaderFactoryImage(factoryImage("0.1.2"))).toBe("0.1.2");
+    expect(() => validatePapilioLoaderFactoryImage(factoryImage("0.1.1"))).toThrow(/older than supported/);
+    const wrongProject = factoryImage("0.1.2");
+    wrongProject.set(new TextEncoder().encode("other_project"), 0x50);
+    expect(() => validatePapilioLoaderFactoryImage(wrongProject)).toThrow(/Unsupported factory application/);
   });
 
   it("rejects keys longer than 15 bytes", () => {

@@ -18,6 +18,10 @@ describe("classifyBootLogLine", () => {
     expect(classifyBootLogLine("[MCP] Debug interface ready. Type H for help.")).toBe("app");
   });
 
+  it("recognizes the Papilio project template's application banner", () => {
+    expect(classifyBootLogLine("Papilio RetroCade - Wishbone System")).toBe("app");
+  });
+
   it("returns null for unrelated lines", () => {
     expect(classifyBootLogLine("I (317) boot: Loaded app from partition at offset 0x280000")).toBeNull();
   });

@@ -5,7 +5,7 @@
 // startSerialListener()/waitForSerialLine()/handleSerialLine() — the serial
 // port's readable stream can only have one active reader, so every consumer
 // of a given port's log output must go through one instance of this class.
-import type { SerialLike } from "./transport.js";
+import { SerialDisconnectError, type SerialLike } from "./transport.js";
 
 export type LineListener = (line: string) => void;
 
@@ -15,6 +15,8 @@ interface Waiter {
   resolve: (line: string) => void;
   reject: (err: Error) => void;
   timeoutHandle: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 export class SerialLineReader {
@@ -92,8 +94,8 @@ export class SerialLineReader {
           }
         }
       } catch (err) {
-        // USB re-enumeration may end the stream with an error or normally;
-        // both cases are reported once from finally below.
+        const message = err instanceof Error ? err.message : "Serial read failed.";
+        this.rejectWaiters(new SerialDisconnectError(`Serial read failed: ${message}`));
       } finally {
         const disconnected = !this.stopped;
         this.stopped = true;
@@ -103,6 +105,7 @@ export class SerialLineReader {
           // already released
         }
         if (disconnected) {
+          this.rejectWaiters(new SerialDisconnectError("Serial device disconnected."));
           for (const listener of this.disconnectListeners) listener();
         }
         this.resolveLoopDone?.();
@@ -112,11 +115,13 @@ export class SerialLineReader {
   }
 
   async stop(): Promise<void> {
+    const wasRunning = !this.stopped;
     this.stopped = true;
     // A pending read keeps the stream locked even after the loop's stop flag
     // changes. Cancel it so esptool-js can open the same native USB port.
     this.reader?.cancel().catch(() => {});
     await this.loopDone;
+    if (wasRunning) this.rejectWaiters(new SerialDisconnectError("Serial reader stopped."));
     // The pipe from port.readable keeps that stream locked until the cancel
     // propagates; port.close() fails (and the port stays open) until then.
     await Promise.race([this.pipeDone, new Promise((resolve) => setTimeout(resolve, 1000))]);
@@ -127,8 +132,7 @@ export class SerialLineReader {
 
     for (const waiter of this.waiters.slice()) {
       if (waiter.matchRegex.test(line)) {
-        clearTimeout(waiter.timeoutHandle);
-        this.waiters = this.waiters.filter((w) => w !== waiter);
+        this.removeWaiter(waiter);
         waiter.resolve(line);
       } else if (waiter.onEachLine) {
         waiter.onEachLine(line);
@@ -136,19 +140,53 @@ export class SerialLineReader {
     }
   }
 
-  waitForLine(matchRegex: RegExp, timeoutMs: number, onEachLine?: LineListener): Promise<string> {
+  waitForLine(
+    matchRegex: RegExp,
+    timeoutMs: number,
+    onEachLine?: LineListener,
+    signal?: AbortSignal
+  ): Promise<string> {
+    if (this.stopped) {
+      return Promise.reject(new SerialDisconnectError("Serial reader is not running."));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(signal.reason instanceof Error ? signal.reason : new SerialDisconnectError("Wait cancelled."));
+    }
+
     return new Promise((resolve, reject) => {
-      const waiter: Waiter = {
+      let waiter: Waiter;
+      const timeoutHandle = setTimeout(() => {
+        this.removeWaiter(waiter);
+        reject(new Error(`Timed out waiting for board (expected ${matchRegex})`));
+      }, timeoutMs);
+      waiter = {
         matchRegex,
         onEachLine,
         resolve,
         reject,
-        timeoutHandle: setTimeout(() => {
-          this.waiters = this.waiters.filter((w) => w !== waiter);
-          reject(new Error(`Timed out waiting for board (expected ${matchRegex})`));
-        }, timeoutMs),
+        timeoutHandle,
+        signal,
       };
+      const onAbort = () => {
+        this.removeWaiter(waiter);
+        reject(signal?.reason instanceof Error ? signal.reason : new SerialDisconnectError("Wait cancelled."));
+      };
+      waiter.onAbort = onAbort;
+      signal?.addEventListener("abort", onAbort, { once: true });
       this.waiters.push(waiter);
     });
+  }
+
+  private rejectWaiters(error: Error): void {
+    for (const waiter of [...this.waiters]) {
+      this.removeWaiter(waiter);
+      waiter.reject(error);
+    }
+  }
+
+  private removeWaiter(waiter: Waiter): void {
+    clearTimeout(waiter.timeoutHandle);
+    if (waiter.onAbort) waiter.signal?.removeEventListener("abort", waiter.onAbort);
+    this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
   }
 }

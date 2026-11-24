@@ -17,13 +17,18 @@ export const SERIAL_FPGA_TARGET: Record<string, FpgaSerialTarget> = {
 
 export type ProgressCallback = (loaded: number, total: number) => void;
 
+export interface SerialFpgaUploadResult {
+  bytesAcknowledged: number;
+  completionAcknowledged: true;
+}
+
 export async function flashFpgaOverSerial(
   port: SerialLike,
   reader: SerialLineReader,
   target: FpgaSerialTarget,
   data: Uint8Array,
   onProgress: ProgressCallback
-): Promise<void> {
+): Promise<SerialFpgaUploadResult> {
   if (!port) throw new Error("No USB serial port connected.");
   // "Connect USB" only selects a port — it doesn't open it. Opening happens
   // lazily here (matching loader.js's flashFpgaOverSerial()) so a port
@@ -33,59 +38,85 @@ export async function flashFpgaOverSerial(
   if (!port.writable) throw new Error("No USB serial port connected.");
 
   const size = data.byteLength;
+  if (size === 0 || size > 0x200000) {
+    throw new Error("FPGA image must contain 1 to 2097152 bytes.");
+  }
   const encoder = new TextEncoder();
   const writer = port.writable.getWriter();
+  const controller = new AbortController();
 
   try {
-    // For target=flash, the board does bootloader-SRAM-load + SPI init +
-    // full-region erase *before* replying READY (see FPGA-Companion's
-    // serial_flash_prepare_spi()) — that can take up to ~60s in the worst
-    // case, so this timeout is long. Keeping the erase ahead of READY avoids
-    // overflowing the board's small USB RX ring buffer with a payload it
-    // can't drain yet.
-    const readyPromise = reader.waitForLine(/^READY$|^FPGA_FLASH_ERROR /, 90000);
+    // READY is emitted before the FPGA bridge is prepared and flash erased.
+    const readyPromise = reader.waitForLine(/^READY$|^FPGA_FLASH_ERROR /, 10000, undefined, controller.signal);
+    void readyPromise.catch(() => {});
     await writer.write(encoder.encode(`FPGA_FLASH_BEGIN ${target} ${size}\n`));
     const readyLine = await readyPromise;
     if (readyLine.startsWith("FPGA_FLASH_ERROR")) {
       throw new Error(`Board rejected request: ${readyLine}`);
     }
 
-    // Long timeout — USB-Serial-JTAG is much slower than WiFi OTA for a full
-    // bitstream write, especially the SPI-flash target (erase + write).
-    const donePromise = reader.waitForLine(/^FPGA_FLASH_OK$|^FPGA_FLASH_ERROR /, 180000, (line) => {
-      const m = line.match(/^PROGRESS (\d+)/);
-      if (m) onProgress(parseInt(m[1], 10), size);
-    });
-
     if (target === "flash") {
-      // Per-chunk flow control: wait for the device's PROGRESS ack (emitted
-      // after every chunk for target=flash) before sending the next chunk.
-      // The device's usb_serial_jtag RX ring buffer is small (16 KB) —
-      // without this, the whole payload can overrun that buffer and wedge
-      // the USB transport permanently if a flash write is ever slower than
-      // the incoming byte rate.
       const CHUNK = 4096;
       for (let offset = 0; offset < size; offset += CHUNK) {
         const end = Math.min(offset + CHUNK, size);
-        // slice() (copy), not subarray() (view) — write() transfers/detaches
-        // the underlying buffer, which would invalidate every other view
-        // into the same source ArrayBuffer after the first write() call.
+        const ackPromise = reader.waitForLine(
+          /^PROGRESS \d+$|^FPGA_FLASH_ERROR /,
+          offset === 0 ? 120000 : 20000,
+          undefined,
+          controller.signal
+        );
+        void ackPromise.catch(() => {});
+        const donePromise =
+          end === size
+            ? reader.waitForLine(/^FPGA_FLASH_OK$|^FPGA_FLASH_ERROR /, 180000, undefined, controller.signal)
+            : null;
+        if (donePromise) void donePromise.catch(() => {});
+
         await writer.write(data.slice(offset, end));
-        await reader.waitForLine(new RegExp(`^PROGRESS ${end}$|^FPGA_FLASH_ERROR `), 10000);
+        const ackLine = await ackPromise;
+        if (ackLine.startsWith("FPGA_FLASH_ERROR ")) throw new Error(`Board reported: ${ackLine}`);
+        if (ackLine !== `PROGRESS ${end}`) {
+          throw new Error(`Unexpected progress acknowledgement: expected ${end} bytes, received "${ackLine}".`);
+        }
+        onProgress(end, size);
+
+        if (donePromise) {
+          const resultLine = await donePromise;
+          if (resultLine.startsWith("FPGA_FLASH_ERROR")) throw new Error(`Board reported: ${resultLine}`);
+        }
       }
     } else {
       const CHUNK = 16384;
-      for (let offset = 0; offset < size; offset += CHUNK) {
-        await writer.write(data.slice(offset, Math.min(offset + CHUNK, size)));
-      }
-    }
+      const donePromise = reader.waitForLine(
+        /^FPGA_FLASH_OK$|^FPGA_FLASH_ERROR /,
+        180000,
+        (line) => {
+          const m = line.match(/^PROGRESS (\d+)/);
+          if (m) onProgress(parseInt(m[1], 10), size);
+        },
+        controller.signal
+      );
+      void donePromise.catch(() => {});
+      const errorPromise = reader.waitForLine(/^FPGA_FLASH_ERROR /, 180000, undefined, controller.signal);
+      void errorPromise.catch(() => {});
 
-    const resultLine = await donePromise;
-    if (resultLine.startsWith("FPGA_FLASH_ERROR")) {
-      throw new Error(`Board reported: ${resultLine}`);
+      for (let offset = 0; offset < size; offset += CHUNK) {
+        const writePromise = writer.write(data.slice(offset, Math.min(offset + CHUNK, size)));
+        await Promise.race([
+          writePromise.then(() => null),
+          errorPromise.then((line) => {
+            throw new Error(`Board reported: ${line}`);
+          }),
+        ]);
+      }
+
+      const resultLine = await donePromise;
+      if (resultLine.startsWith("FPGA_FLASH_ERROR")) throw new Error(`Board reported: ${resultLine}`);
     }
     onProgress(size, size);
+    return { bytesAcknowledged: size, completionAcknowledged: true };
   } finally {
+    controller.abort(new Error("Serial FPGA upload ended."));
     writer.releaseLock();
   }
 }
