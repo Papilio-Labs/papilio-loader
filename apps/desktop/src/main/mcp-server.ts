@@ -365,7 +365,7 @@ function createNodePoster() {
 
 export function createServer(options: McpServerOptions = {}): McpServer {
   const appDataDirectory = getAppDataDirectory(options.appDataRoot ?? getDefaultAppDataRoot());
-  const server = new McpServer({ name: "papilio-loader", version: "0.5.0" });
+  const server = new McpServer({ name: "papilio-loader", version: "0.5.1" });
 
   server.tool("list_serial_ports", "List serial ports and USB identity metadata. Interface 0 is the RetroCade USB console.", {}, async () => {
     return textResult(await NodeSerialAdapter.listPorts());
@@ -901,16 +901,58 @@ export interface HttpMcpServerHandle {
 }
 
 export async function startHttpMcpServer(port: number, appDataRoot?: string): Promise<HttpMcpServerHandle> {
-  const server = createServer({ appDataRoot });
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID() });
-  await server.connect(transport);
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
+  const transports = new Set<StreamableHTTPServerTransport>();
 
   const httpServer: HttpServer = createHttpServer((req, res) => {
-    if (req.url === "/mcp") {
-      void transport.handleRequest(req, res);
+    if (req.url !== "/mcp") {
+      res.writeHead(404).end("Not found");
       return;
     }
-    res.writeHead(404).end("Not found");
+
+    void (async () => {
+      const sessionId = req.headers["mcp-session-id"];
+      if (typeof sessionId === "string") {
+        const transport = sessions.get(sessionId);
+        if (!transport) {
+          res.writeHead(404).end("MCP session not found");
+          return;
+        }
+        await transport.handleRequest(req, res);
+        return;
+      }
+
+      if (req.method !== "POST" || sessionId !== undefined) {
+        res.writeHead(400).end("MCP session ID required");
+        return;
+      }
+
+      const server = createServer({ appDataRoot });
+      const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => { sessions.set(id, transport); },
+      });
+      transports.add(transport);
+      try {
+        await server.connect(transport);
+        const onClose = transport.onclose;
+        transport.onclose = () => {
+          if (transport.sessionId) sessions.delete(transport.sessionId);
+          transports.delete(transport);
+          onClose?.();
+        };
+        await transport.handleRequest(req, res);
+      } finally {
+        if (!transport.sessionId) {
+          transports.delete(transport);
+          await transport.close();
+        }
+      }
+    })().catch((error: unknown) => {
+      console.error("MCP HTTP request failed:", error);
+      if (!res.headersSent) res.writeHead(500).end("MCP HTTP request failed");
+      else res.destroy();
+    });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -918,11 +960,15 @@ export async function startHttpMcpServer(port: number, appDataRoot?: string): Pr
     httpServer.listen(port, "127.0.0.1", resolve);
   });
 
+  const address = httpServer.address();
+  if (!address || typeof address === "string") throw new Error("MCP HTTP server did not bind to a TCP port.");
   return {
-    port,
-    close: () =>
-      new Promise<void>((resolve) => {
-        httpServer.close(() => resolve());
-      }),
+    port: address.port,
+    close: async () => {
+      await Promise.all([...transports].map((transport) => transport.close()));
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => error ? reject(error) : resolve());
+      });
+    },
   };
 }

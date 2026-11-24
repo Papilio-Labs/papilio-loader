@@ -7,6 +7,8 @@ binary as a complete flash image.
 This contract applies to the Electron and standalone TypeScript MCP server. The
 separate Python MCP package and browser UI have not been migrated by this
 change; see [OTA_FEATURE.md](OTA_FEATURE.md) for the legacy Python behavior.
+Version 0.5.1 fixes HTTP MCP client reconnection and supports simultaneous
+client sessions.
 
 ## Upload modes
 

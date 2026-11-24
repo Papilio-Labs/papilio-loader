@@ -1,7 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
-import { createServer } from "../src/main/mcp-server.js";
+import { createServer, startHttpMcpServer } from "../src/main/mcp-server.js";
 
 async function connectMcpServer() {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -27,6 +28,34 @@ describe("desktop MCP resident-loader tools", () => {
       await client.close();
       await server.close();
     }
+  });
+
+  describe("desktop MCP HTTP sessions", () => {
+    it("supports simultaneous clients and reconnects after a client closes", async () => {
+      const server = await startHttpMcpServer(0);
+      const url = new URL(`http://127.0.0.1:${server.port}/mcp`);
+      const clients: Client[] = [];
+      async function connect() {
+        const client = new Client({ name: "http-session-test", version: "1.0.0" });
+        clients.push(client);
+        await client.connect(new StreamableHTTPClientTransport(url));
+        return client;
+      }
+
+      try {
+        const [first, second] = await Promise.all([connect(), connect()]);
+        expect((await first.listTools()).tools.some((tool) => tool.name === "flash_device")).toBe(true);
+        await first.close();
+        expect((await second.listTools()).tools.some((tool) => tool.name === "resume_application")).toBe(true);
+        const third = await connect();
+        expect((await third.listTools()).tools.some((tool) => tool.name === "enter_bootloader")).toBe(true);
+        const unknownSession = await fetch(url, { headers: { "mcp-session-id": "unknown" } });
+        expect(unknownSession.status).toBe(404);
+      } finally {
+        await Promise.all(clients.map((client) => client.close()));
+        await server.close();
+      }
+    });
   });
 
   it("rejects caller-supplied flash addresses before reading an image or opening a port", async () => {
