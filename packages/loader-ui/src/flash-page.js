@@ -558,7 +558,6 @@ export function initFlashPage(doc = document) {
         "ok"
       );
       updateFlashEsp32Enabled();
-      els.btnSendWifi.disabled = false;
     } catch (err) {
       log(`Connect failed: ${err.message}`);
       setStatus(els.statusEsp32, `Connect failed: ${err.message}`, "error");
@@ -642,7 +641,6 @@ export function initFlashPage(doc = document) {
       // The watchdog reset re-enumerates USB; wait for the board's port to come back.
       awaitingReconnect = true;
       log("ESP32 write complete; USB serial port closed.");
-      els.btnSendWifi.disabled = false;
       // Never leave the buttons greyed out after a finished install (it used to
       // need a page reload).
       els.btnConnect.disabled = false;
@@ -709,7 +707,12 @@ export function initFlashPage(doc = document) {
     try {
       // Neither firmware listens for serial WiFi commands, so write the
       // settings (and the boot selection for FPGA-Companion) into flash.
-      if (!serialPort) throw new Error("No USB port selected.");
+      if (!serialPort) {
+        adoptPort(await navigator.serial.requestPort());
+        log("Serial port selected.");
+        updateFlashFpgaEnabled();
+        updateA2600Enabled();
+      }
       // A port from before the Step 1 reset can't be reopened; swap in the re-enumerated one.
       if (!reader?.isRunning) await startSerialListenerWithRetry(10, 750);
       await closeSerialSession();
@@ -732,7 +735,7 @@ export function initFlashPage(doc = document) {
       log(`Send WiFi credentials failed: ${err.message}`);
       setStatus(
         els.statusWifi,
-        `Send failed: ${err.message} Unplug and replug the board's USB cable, click Find My IP to pick its port again, then click Send to Board.`,
+        `Send failed: ${err.message} Check the USB connection and try Send to Board again.`,
         "error"
       );
     } finally {
@@ -771,7 +774,6 @@ export function initFlashPage(doc = document) {
       adoptPort(picked);
       log("Serial port selected.");
       await startSerialListener();
-      els.btnSendWifi.disabled = false;
       setStatus(els.statusWifi, "Listening on USB — press the RESET button on your board to see its IP.");
       updateA2600Enabled();
     } catch (err) {
@@ -805,7 +807,6 @@ export function initFlashPage(doc = document) {
       await resetEsp32ForIp(serialPort, log);
       await waitForUsbPort(previousPort);
       await startSerialListenerWithRetry();
-      els.btnSendWifi.disabled = false;
       setStatus(els.statusTools, "Board restarted. If it has WiFi, its IP appears under Device IP.", "ok");
     } catch (err) {
       awaitingReconnect = false;

@@ -114,6 +114,10 @@ function md5(data: Uint8Array): Uint8Array {
   return createHash("md5").update(data).digest();
 }
 
+function sha256(data: Uint8Array): Uint8Array {
+  return createHash("sha256").update(data).digest();
+}
+
 async function persistOtadataBackup(
   data: Uint8Array,
   identity: string,
@@ -291,19 +295,24 @@ async function waitForObservedBoot(observer: Promise<"app" | "unknown">): Promis
 }
 
 async function observeHttpApplication(ip: string, port: number): Promise<{ observed: boolean; error?: string }> {
-  const deadline = Date.now() + 12000;
+  const timeoutMs = 30000;
+  const deadline = Date.now() + timeoutMs;
   let lastError = "";
   while (Date.now() < deadline) {
     try {
-      const body = await fetchDeviceStatusText(ip, port);
+      const body = await fetchDeviceStatusText(ip, port, Math.min(1500, deadline - Date.now()));
       if (identifyDeviceText(body).role === "app") return { observed: true };
       lastError = "HTTP endpoint did not identify an application.";
     } catch (error) {
       lastError = error instanceof Error ? error.message : "HTTP application observation failed.";
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(500, remaining)));
   }
-  return { observed: false, error: lastError || "Timed out waiting for the application over HTTP." };
+  return {
+    observed: false,
+    error: `Timed out waiting for the application over HTTP after ${timeoutMs / 1000} seconds.${lastError ? ` Last status: ${lastError}` : ""}`,
+  };
 }
 
 function textResult(value: unknown) {
@@ -346,6 +355,22 @@ function assertBodyContains(response: string, expected: RegExp, operation: strin
   return response;
 }
 
+async function requestHttpResume(ip: string, port: number): Promise<{
+  resumeAcknowledged: boolean;
+  response?: string;
+  resumeWarning?: string;
+}> {
+  let response: string;
+  try {
+    response = await resumeEsp32Ota(ip, port);
+  } catch (error) {
+    if (!(error instanceof TypeError) && !(error instanceof DOMException && error.name === "AbortError")) throw error;
+    return { resumeAcknowledged: false, resumeWarning: `Resume response was not received: ${error.message}.` };
+  }
+  assertBodyContains(response, /^Resuming 'ota_[01]'\./, "Loader resume");
+  return { resumeAcknowledged: true, response };
+}
+
 function createNodePoster() {
   return {
     post: async (url: string, body: BodyInit) => {
@@ -365,7 +390,7 @@ function createNodePoster() {
 
 export function createServer(options: McpServerOptions = {}): McpServer {
   const appDataDirectory = getAppDataDirectory(options.appDataRoot ?? getDefaultAppDataRoot());
-  const server = new McpServer({ name: "papilio-loader", version: "0.5.1" });
+  const server = new McpServer({ name: "papilio-loader", version: "0.5.2" });
 
   server.tool("list_serial_ports", "List serial ports and USB identity metadata. Interface 0 is the RetroCade USB console.", {}, async () => {
     return textResult(await NodeSerialAdapter.listPorts());
@@ -418,10 +443,10 @@ export function createServer(options: McpServerOptions = {}): McpServer {
         if (args.mode === "provision" && args.device_type !== "esp32") {
           throw new Error("mode=provision is only available for merged ESP32 images.");
         }
-        const data = new Uint8Array(await readFile(args.file_path));
+        let data: Uint8Array = new Uint8Array(await readFile(args.file_path));
         if (args.device_type === "esp32") {
           if (args.mode === "resident") validateRawEsp32AppImage(data);
-          else validateMergedLoaderImage(data, md5);
+          else data = validateMergedLoaderImage(data, md5, sha256);
         } else {
           if (args.mode !== "resident") throw new Error("FPGA uploads use resident mode only.");
           validateFpgaBitstream(data);
@@ -569,6 +594,7 @@ export function createServer(options: McpServerOptions = {}): McpServer {
     },
     async (args) => {
       let phase = "preflight";
+      let handoffWarning: string | undefined;
       try {
         if (args.verify) throw new Error("Full-image readback verification is unsupported; no bytes have been written.");
         if (args.device_type === "esp32" && args.stay_in_loader) {
@@ -603,7 +629,7 @@ export function createServer(options: McpServerOptions = {}): McpServer {
               await waitForHttpLoader(args.ip, args.port);
             } else {
               phase = "identify_http_loader";
-              await ensureHttpLoader(args.ip, args.port);
+              handoffWarning = (await ensureHttpLoader(args.ip, args.port)).handoffWarning;
             }
 
             bootController = session ? new AbortController() : undefined;
@@ -616,6 +642,7 @@ export function createServer(options: McpServerOptions = {}): McpServer {
             let destination: string;
             let response: string;
             let selectedSlot: string | undefined;
+            let resumeResult: Awaited<ReturnType<typeof requestHttpResume>> | undefined;
 
             phase = "upload";
             if (args.device_type === "esp32") {
@@ -639,14 +666,14 @@ export function createServer(options: McpServerOptions = {}): McpServer {
             if (args.device_type === "fpga" && !args.stay_in_loader) {
               phase = "resume";
               try {
-                const resumeResponse = await resumeEsp32Ota(args.ip, args.port);
-                assertBodyContains(resumeResponse, /^Resuming 'ota_[01]'\./, "Loader resume");
+                resumeResult = await requestHttpResume(args.ip, args.port);
               } catch (error) {
                 return errorResult(phase, error, {
                   imageWritten: true,
                   bytesAcknowledged: uploadedBytes,
                   destination,
                   response,
+                  handoffWarning,
                 });
               }
             }
@@ -665,6 +692,7 @@ export function createServer(options: McpServerOptions = {}): McpServer {
                 response,
                 verification: "http-success-response-only",
                 bootObserved: false,
+                handoffWarning,
               });
             }
 
@@ -686,6 +714,9 @@ export function createServer(options: McpServerOptions = {}): McpServer {
                 selectedSlot,
                 completionAcknowledged: true,
                 bootObserved: false,
+                handoffWarning,
+                resumeAcknowledged: resumeResult?.resumeAcknowledged,
+                resumeWarning: resumeResult?.resumeWarning,
               });
             }
 
@@ -702,6 +733,9 @@ export function createServer(options: McpServerOptions = {}): McpServer {
               response,
               verification: "http-success-response-only",
               bootObserved: true,
+              handoffWarning,
+              resumeAcknowledged: resumeResult?.resumeAcknowledged,
+              resumeWarning: resumeResult?.resumeWarning,
             });
           } finally {
             bootController?.abort(new Error("HTTP application observation ended."));
@@ -716,7 +750,9 @@ export function createServer(options: McpServerOptions = {}): McpServer {
         return errorResult(
           phase,
           error,
-          phase === "upload" ? { bytesAcknowledged: null, imageWritten: "unknown" } : {}
+          phase === "upload"
+            ? { bytesAcknowledged: null, imageWritten: "unknown", handoffWarning }
+            : { handoffWarning }
         );
       }
     }
@@ -772,6 +808,7 @@ export function createServer(options: McpServerOptions = {}): McpServer {
             device: { ip, port: args.http_port },
             loaderIdentity: result.identity,
             handedOff: result.handedOff,
+            handoffWarning: result.handoffWarning,
             metadataReset: false,
           });
         });
@@ -838,15 +875,13 @@ export function createServer(options: McpServerOptions = {}): McpServer {
             throw new Error("HTTP endpoint did not positively identify the resident loader; resume was not sent.");
           }
           phase = "resume";
-          const response = await resumeEsp32Ota(ip, args.http_port);
-          assertBodyContains(response, /^Resuming 'ota_[01]'\./, "Loader resume");
+          const resumeResult = await requestHttpResume(ip, args.http_port);
           phase = "boot_observation";
           const boot = await observeHttpApplication(ip, args.http_port);
           if (!boot.observed) {
             return errorResult(phase, new Error(boot.error ?? "Application boot was not observed."), {
-              resumeAcknowledged: true,
+              ...resumeResult,
               bootObserved: false,
-              response,
             });
           }
           return textResult({
@@ -854,9 +889,8 @@ export function createServer(options: McpServerOptions = {}): McpServer {
             phase: "completed",
             transport: "http",
             device: { ip, port: args.http_port },
-            resumeAcknowledged: true,
+            ...resumeResult,
             bootObserved: true,
-            response,
           });
         });
       } catch (error) {

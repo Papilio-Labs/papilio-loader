@@ -1,7 +1,10 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import { createServer, startHttpMcpServer } from "../src/main/mcp-server.js";
 
 async function connectMcpServer() {
@@ -77,6 +80,191 @@ describe("desktop MCP resident-loader tools", () => {
     } finally {
       await client.close();
       await server.close();
+    }
+  });
+
+  it("reports a lost handoff reply when the loader is subsequently confirmed", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("FPGA Companion - Network Recovery"))
+      .mockRejectedValueOnce(new DOMException("request timed out", "AbortError"))
+      .mockResolvedValueOnce(new Response("Papilio ESP Bootloader"));
+    vi.stubGlobal("fetch", fetch);
+    const { client, server } = await connectMcpServer();
+    try {
+      const result = await client.callTool({
+        name: "enter_bootloader",
+        arguments: { transport: "http", ip: "192.0.2.1" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining('"handoffWarning": "Handoff response was not received: request timed out."'),
+      }));
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    } finally {
+      await client.close();
+      await server.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports an unacknowledged resume only after the application is observed", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("Papilio ESP Bootloader"))
+      .mockRejectedValueOnce(new TypeError("connection closed"))
+      .mockResolvedValueOnce(new Response("FPGA Companion - Network Recovery"));
+    vi.stubGlobal("fetch", fetch);
+    const { client, server } = await connectMcpServer();
+    try {
+      const result = await client.callTool({
+        name: "resume_application",
+        arguments: { transport: "http", ip: "192.0.2.1" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({
+        text: expect.stringMatching(/"resumeAcknowledged": false[\s\S]*"resumeWarning":[\s\S]*"bootObserved": true/),
+      }));
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    } finally {
+      await client.close();
+      await server.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retains upload acknowledgement when a lost resume reply is followed by application boot", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "papilio-resume-test-"));
+    const image = path.join(directory, "fpga.bin");
+    await writeFile(image, Buffer.from([...new Array(22).fill(0xff), 0xa5, 0xc3]));
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("Papilio ESP Bootloader"))
+      .mockResolvedValueOnce(new Response("FPGA flash update successful!"))
+      .mockRejectedValueOnce(new DOMException("timed out", "AbortError"))
+      .mockResolvedValueOnce(new Response("FPGA Companion - Network Recovery"));
+    vi.stubGlobal("fetch", fetch);
+    const { client, server } = await connectMcpServer();
+    try {
+      const result = await client.callTool({
+        name: "flash_device_ota",
+        arguments: { ip: "192.0.2.1", device_type: "fpga", file_path: image },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({
+        text: expect.stringMatching(/"completionAcknowledged": true[\s\S]*"bootObserved": true[\s\S]*"resumeAcknowledged": false/),
+      }));
+      expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/resume"))).toHaveLength(1);
+    } finally {
+      await client.close();
+      await server.close();
+      vi.unstubAllGlobals();
+      await rm(directory, { recursive: true });
+    }
+  });
+
+  it("observes an application that returns more than 12 seconds after an acknowledged resume", async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("Papilio ESP Bootloader"))
+      .mockResolvedValueOnce(new Response("Resuming 'ota_0'. Rebooting..."))
+      .mockImplementationOnce(async () => {
+        now += 13000;
+        return new Response("Papilio ESP Bootloader");
+      })
+      .mockResolvedValueOnce(new Response("FPGA Companion - Network Recovery"));
+    vi.stubGlobal("fetch", fetch);
+    const { client, server } = await connectMcpServer();
+    try {
+      const result = await client.callTool({
+        name: "resume_application",
+        arguments: { transport: "http", ip: "192.0.2.1" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({
+        text: expect.stringMatching(/"resumeAcknowledged": true[\s\S]*"bootObserved": true/),
+      }));
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    } finally {
+      await client.close();
+      await server.close();
+      vi.unstubAllGlobals();
+      clock.mockRestore();
+    }
+  });
+
+  it("does not treat an explicit resume HTTP error as a successful boot", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("Papilio ESP Bootloader"))
+      .mockResolvedValueOnce(new Response("failed", { status: 500 }));
+    vi.stubGlobal("fetch", fetch);
+    const { client, server } = await connectMcpServer();
+    try {
+      const result = await client.callTool({
+        name: "resume_application",
+        arguments: { transport: "http", ip: "192.0.2.1" },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({ text: expect.stringContaining("HTTP 500") }));
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.close();
+      await server.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves an HTTP error even if its response body is lost", async () => {
+    const body = new ReadableStream({ start(controller) { controller.error(new TypeError("body lost")); } });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("Papilio ESP Bootloader"))
+      .mockResolvedValueOnce(new Response(body, { status: 500 }));
+    vi.stubGlobal("fetch", fetch);
+    const { client, server } = await connectMcpServer();
+    try {
+      const result = await client.callTool({
+        name: "resume_application",
+        arguments: { transport: "http", ip: "192.0.2.1" },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({ text: expect.stringContaining("HTTP 500") }));
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      await client.close();
+      await server.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports failure when an unacknowledged resume is not followed by application identity", async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("Papilio ESP Bootloader"))
+      .mockRejectedValueOnce(new TypeError("connection closed"))
+      .mockImplementation(async () => {
+        now += 31000;
+        return new Response("Papilio ESP Bootloader");
+      });
+    vi.stubGlobal("fetch", fetch);
+    const { client, server } = await connectMcpServer();
+    try {
+      const result = await client.callTool({
+        name: "resume_application",
+        arguments: { transport: "http", ip: "192.0.2.1" },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content).toContainEqual(expect.objectContaining({
+        text: expect.stringMatching(/"resumeAcknowledged": false[\s\S]*"resumeWarning":[\s\S]*"bootObserved": false/),
+      }));
+      expect(result.content).toContainEqual(expect.objectContaining({
+        text: expect.stringContaining("Timed out waiting for the application over HTTP after 30 seconds."),
+      }));
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    } finally {
+      await client.close();
+      await server.close();
+      vi.unstubAllGlobals();
+      clock.mockRestore();
     }
   });
 

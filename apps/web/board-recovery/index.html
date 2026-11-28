@@ -196,7 +196,8 @@
       <summary>Advanced tools: add WiFi later, find the board's IP, restart over USB</summary>
       <p class="flash-step-desc">
         <strong>Skipped WiFi in Step 1?</strong> Enter it here (it is written over USB, never sent over the
-        internet; the board restarts into FPGA-Companion and joins your 2.4 GHz WiFi).
+        internet; click <em>Send to Board</em> and select its USB port if prompted. The board restarts
+        into FPGA-Companion and joins your 2.4 GHz WiFi).
         <strong>Already set up from a previous session?</strong> Click <em>Find My IP</em> and press RESET
         on the board, or type its IP below, then go straight to Step 2.
       </p>
@@ -204,7 +205,7 @@
       <div class="flash-row">
         <input type="text" id="wifi-ssid" placeholder="WiFi network name (SSID)" autocomplete="off">
         <input type="password" id="wifi-pass" placeholder="WiFi password" autocomplete="off">
-        <button id="btn-send-wifi" class="btn btn-primary" disabled>Send to Board</button>
+        <button id="btn-send-wifi" class="btn btn-primary">Send to Board</button>
         <button id="btn-find-ip" class="btn btn-outline">Find My IP</button>
       </div>
       <p class="flash-status" id="status-wifi"></p>
@@ -223,6 +224,6 @@
     </details>
   </main>
 
-  <script type="module" src="board-recovery.bundle.js?v=0.6.0"></script>
+  <script type="module" src="board-recovery.bundle.js?v=0.6.1"></script>
 </body>
 </html>

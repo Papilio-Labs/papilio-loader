@@ -10,6 +10,7 @@ import {
   provisionMergedImage,
   seedBootSelectionInMergedImage,
   validatePapilioLoaderFactoryImage,
+  validateMergedLoaderImage,
   validateSupportedLoaderPartitionTable,
 } from "../src/nvs-image.js";
 
@@ -119,6 +120,24 @@ describe("nvs-image", () => {
     const wrongProject = factoryImage("0.1.2");
     wrongProject.set(new TextEncoder().encode("other_project"), 0x50);
     expect(() => validatePapilioLoaderFactoryImage(wrongProject)).toThrow(/Unsupported factory application/);
+  });
+
+  it("pads only the verified published short migration image and preserves full images", () => {
+    const md5 = (data: Uint8Array) => createHash("md5").update(data).digest();
+    const publishedDigest = Buffer.from("757f350753975d7ff097888bd7e2776862ac765c29959253b56b7de97b32f128", "hex");
+    const short = new Uint8Array(2543808).fill(0xff);
+    short[0] = 0xe9;
+    short.set(supportedPartitionTable(), 0x8000);
+    short.set(factoryImage("0.1.3"), 0x20000);
+    const padded = validateMergedLoaderImage(short, md5, () => publishedDigest);
+    expect(padded.length).toBe(0x400000);
+    expect(Buffer.from(padded.subarray(0, short.length)).equals(Buffer.from(short))).toBe(true);
+    expect(padded.subarray(short.length).every((byte) => byte === 0xff)).toBe(true);
+    expect(validateMergedLoaderImage(padded, md5, () => { throw new Error("unexpected hash"); })).toBe(padded);
+    expect(() => validateMergedLoaderImage(short, md5, (data) => createHash("sha256").update(data).digest()))
+      .toThrow(/verified v2.2.3/);
+    expect(() => validateMergedLoaderImage(short.subarray(0, short.length - 1), md5, () => publishedDigest))
+      .toThrow(/verified v2.2.3/);
   });
 
   it("rejects keys longer than 15 bytes", () => {

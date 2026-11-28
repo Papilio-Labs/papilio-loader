@@ -25,6 +25,10 @@ client sessions.
 - A complete merged ESP image is accepted only with the explicit
   `mode="provision"` option. Provision mode writes the complete image from
   offset zero and is not an automatic fallback for resident upload errors.
+- The published FPGA-Companion v2.2.3 migration image is shorter than 4 MB.
+  Its published SHA-256 and exact length are checked before padding the
+  remainder with erased (`0xff`) bytes. Other short images are rejected;
+  they must be supplied as complete 4 MB images.
 - `address` is rejected. `verify=true` is rejected before writing because the
   protocol does not provide full-image readback. `force` cannot bypass board
   identity or recovery consent.
@@ -51,6 +55,18 @@ identity. A compatible application may be asked to hand off through
 uploading. ESP uploads check `/update-target` and report the loader-selected
 slot. FPGA uploads target persistent flash by default; `fpga_target="sram"`
 selects volatile SRAM.
+
+If the handoff reply is lost during a reboot, the client polls for a positively
+identified loader before uploading. It does not resend the handoff request or
+start an upload without confirming the loader. Results include `handoffWarning`
+when the loader was confirmed despite a missing handoff reply.
+
+If a `/resume` reply is lost, the client does not resend it. It reports
+`resumeAcknowledged: false` and a `resumeWarning`, and succeeds only if the
+application is subsequently identified. Explicit HTTP errors and a missing
+application identity remain failures. HTTP boot observation waits up to 30 seconds
+for an application status response; a timeout does not mean that a completed
+upload failed or that the application cannot start later.
 
 USB-assisted entry is opt-in: pass `usb_port` to select the console interface.
 The selected USB board must report the same IP address as the requested HTTP

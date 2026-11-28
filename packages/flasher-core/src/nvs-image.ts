@@ -150,8 +150,18 @@ export function validatePapilioLoaderFactoryImage(data: Uint8Array, minimumVersi
   return version;
 }
 
-export function validateMergedLoaderImage(data: Uint8Array, md5: DigestFunction): void {
-  if (data.length !== 0x400000 || data[0] !== 0xe9) {
+export function validateMergedLoaderImage(data: Uint8Array, md5: DigestFunction, sha256: DigestFunction): Uint8Array {
+  if (data.length !== 0x400000) {
+    if (data.length !== 2543808 ||
+        Array.from(sha256(data), (byte) => byte.toString(16).padStart(2, "0")).join("") !==
+          "757f350753975d7ff097888bd7e2776862ac765c29959253b56b7de97b32f128") {
+      throw new Error("Provisioning requires a complete 4 MB merged ESP image or the verified v2.2.3 migration image.");
+    }
+    const padded = new Uint8Array(0x400000).fill(0xff);
+    padded.set(data);
+    data = padded;
+  }
+  if (data[0] !== 0xe9) {
     throw new Error("Provisioning requires a complete 4 MB merged ESP image.");
   }
   const table = data.subarray(0x8000, 0x8000 + 0xc00);
@@ -159,6 +169,7 @@ export function validateMergedLoaderImage(data: Uint8Array, md5: DigestFunction)
   const factory = entries.find((entry) => entry.label === "factory");
   if (!factory) throw new Error("Merged image has no factory partition.");
   validatePapilioLoaderFactoryImage(data.subarray(factory.offset, factory.offset + 0x100), "0.1.2");
+  return data;
 }
 
 export type NvsValue = { type: "u8"; value: number } | { type: "string"; value: string };

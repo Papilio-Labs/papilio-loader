@@ -77,6 +77,35 @@ describe("flashFpgaOverSerial", () => {
     reader.stop();
   });
 
+  it.each([
+    { failedChunk: 1, error: "ESP_ERR_INVALID_SIZE" },
+    { failedChunk: 2, error: "ESP_FAIL" },
+  ])("stops and reports a flash failure after READY on chunk $failedChunk", async ({ failedChunk, error }) => {
+    const port = new MockSerialPort();
+    const reader = new SerialLineReader(port);
+    await reader.start();
+
+    let writes = 0;
+    port.onWrite = () => {
+      writes++;
+      if (writes === 1) {
+        queueMicrotask(() => port.emit("READY"));
+      } else if (writes === failedChunk + 1) {
+        queueMicrotask(() => port.emit(`FPGA_FLASH_ERROR ${error}`));
+      } else {
+        queueMicrotask(() => port.emit("PROGRESS 4096"));
+      }
+    };
+
+    const progress: number[] = [];
+    await expect(
+      flashFpgaOverSerial(port, reader, "flash", new Uint8Array(4096 * 3), (loaded) => progress.push(loaded))
+    ).rejects.toThrow(`Board reported: FPGA_FLASH_ERROR ${error}`);
+    expect(port.writes).toHaveLength(failedChunk + 1);
+    expect(progress).toEqual(failedChunk === 1 ? [] : [4096]);
+    reader.stop();
+  });
+
   it("registers the cumulative progress waiter before writing each flash chunk", async () => {
     const port = new MockSerialPort();
     const reader = new SerialLineReader(port);

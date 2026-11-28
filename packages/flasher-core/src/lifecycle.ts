@@ -133,6 +133,7 @@ export async function ensureUsbLoader(
 export interface HttpLoaderResult {
   identity: "loader";
   handedOff: boolean;
+  handoffWarning?: string;
 }
 
 export async function ensureHttpLoader(
@@ -147,27 +148,38 @@ export async function ensureHttpLoader(
     throw new Error("HTTP status endpoint did not positively identify a Papilio loader or compatible application.");
   }
 
-  const handoffStatus = await requestGotoLoader(ip, port);
-  if (handoffStatus === 404) {
-    throw new Error("The identified application does not support POST /goto-loader; use explicit USB recovery if available.");
-  }
-  if (handoffStatus < 200 || handoffStatus >= 300) {
-    throw new Error(`Application loader handoff failed with HTTP ${handoffStatus}.`);
+  let handoffError = "";
+  try {
+    const handoffStatus = await requestGotoLoader(ip, port);
+    if (handoffStatus === 404) {
+      throw new Error("The identified application does not support POST /goto-loader; use explicit USB recovery if available.");
+    }
+    if (handoffStatus < 200 || handoffStatus >= 300) {
+      throw new Error(`Application loader handoff failed with HTTP ${handoffStatus}.`);
+    }
+  } catch (error) {
+    if (!(error instanceof TypeError) && !(error instanceof DOMException && error.name === "AbortError")) {
+      throw error;
+    }
+    handoffError = `Handoff response was not received: ${error.message}.`;
   }
 
   const timeoutMs = options.timeoutMs ?? 20000;
   const pollIntervalMs = options.pollIntervalMs ?? 500;
   const deadline = Date.now() + timeoutMs;
-  let lastError = "";
+  let lastError = handoffError;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     try {
       const text = await fetchDeviceStatusText(ip, port);
       const role = classifyStatusResponseText(text);
-      if (role === "loader") return { identity: "loader", handedOff: true };
-      if (role === "unknown") lastError = "HTTP endpoint responded with an unknown firmware identity.";
+      if (role === "loader") {
+        return { identity: "loader", handedOff: true, ...(handoffError && { handoffWarning: handoffError }) };
+      }
+      if (role === "unknown") lastError = `${handoffError} HTTP endpoint responded with an unknown firmware identity.`.trim();
     } catch (error) {
-      lastError = error instanceof Error ? error.message : "HTTP status probe failed.";
+      const message = error instanceof Error ? error.message : "HTTP status probe failed.";
+      lastError = `${handoffError} ${message}`.trim();
     }
   }
   throw new Error(`Timed out waiting for the resident loader after HTTP handoff. ${lastError}`.trim());

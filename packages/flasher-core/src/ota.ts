@@ -37,9 +37,16 @@ export async function resumeEsp32Ota(ip: string, port: number = OTA_PORT, timeou
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`http://${ip}:${port}/resume`, { method: "POST", signal: controller.signal });
-    const body = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
-    return body;
+    if (!res.ok) {
+      let body: string;
+      try {
+        body = await res.text();
+      } catch (error) {
+        throw new Error(`HTTP ${res.status}: response body could not be read.`, { cause: error });
+      }
+      throw new Error(`HTTP ${res.status}: ${body || res.statusText}`);
+    }
+    return await res.text();
   } finally {
     clearTimeout(timeout);
   }
